@@ -115,7 +115,7 @@ tweet_to_row <- function(tw, user) {
 }
 
 # scrape one handle ---------------------------------------------
-scrape_one <- function(user, limit = 100L) {
+scrape_one <- function(user, limit = 10000L) {
   tryCatch({
     info  <- asyncio$run(api$user_by_login(user))
     me_id <- as_chr(info$id)
@@ -376,3 +376,4 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
+
