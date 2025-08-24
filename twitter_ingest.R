@@ -1,4 +1,3 @@
-
 #!/usr/bin/env Rscript
 # ---------------------------------------------------------------
 #  Scrape tweets for a set of handles and upsert into Supabase,
@@ -49,15 +48,20 @@ def list_of_safe_dicts(tweets):
     return [_fix_ints(t.dict()) for t in tweets]
 ")
 
-py <- import_builtins()
+# ← NEW: import the module where the functions above were defined
+pymain      <- reticulate::import("__main__", convert = FALSE)
+pybuiltins  <- reticulate::import_builtins()
+py_none     <- pybuiltins$None
+
+as_chr <- function(x) if (!identical(x, py_none)) reticulate::py_str(x) else NA_character_
+as_num <- function(x) if (!identical(x, py_none)) suppressWarnings(as.numeric(reticulate::py_str(x))) else NA_real_
 
 ## 2 – Add account (needs cookies) ------------------------------
 cookie_json <- Sys.getenv("TW_COOKIES_JSON")
 if (cookie_json == "") stop("TW_COOKIES_JSON env var not set")
 
 cookies_list <- jsonlite::fromJSON(cookie_json)
-cookies_str  <- paste(paste0(cookies_list$name, "=", cookies_list$value),
-                      collapse = "; ")
+cookies_str  <- paste(paste0(cookies_list$name, "=", cookies_list$value), collapse = "; ")
 asyncio$run(api$pool$add_account("x","x","x","x", cookies=cookies_str))
 
 message(sprintf("✅ %d cookies loaded, total chars = %d",
@@ -69,95 +73,83 @@ handles <- trimws(strsplit(
 )[[1]])
 message("✅ Handles: ", paste(handles, collapse = ", "))
 
-py_none <- import_builtins()$None
-as_chr  <- function(x) if (!identical(x, py_none)) py_str(x) else NA_character_
-as_num  <- function(x) if (!identical(x, py_none)) suppressWarnings(as.numeric(py_str(x))) else NA_real_
-
-# --- turn one Tweet (as a python dict) into a tidy row ----------
+# --- turn one Tweet (as an R list) into a tidy row --------------
 tweet_to_row <- function(tw, user) {
-  # lists
-  tags  <- tw$`get`("hashtags")
-  ctags <- tw$`get`("cashtags")
-  hashtags  <- if (!is.null(tags) && length(tags))  str_c(py_to_r(tags),  collapse = ",") else NA_character_
-  cashtags  <- if (!is.null(ctags) && length(ctags)) str_c(py_to_r(ctags), collapse = ",") else NA_character_
-  
-  # in-reply-to
-  in_user <- tw$`get`("inReplyToUser")
-  parent_user_username <- if (!is.null(in_user)) {
-    u <- in_user$`get`("username")
-    if (is.null(u)) NA_character_ else py_to_r(u)
-  } else NA_character_
-  
-  id_str   <- as.character(py_to_r(tw$`get`("id")))
-  user_id  <- as.character(py_to_r(tw$`get`("user")$`get`("id") %||% NA))
-  created  <- py_to_r(tw$`get`("date"))
-  text     <- py_to_r(tw$`get`("rawContent") %||% NA_character_)
-  
-  like     <- suppressWarnings(as.numeric(py_to_r(tw$`get`("likeCount"))))
-  retweet  <- suppressWarnings(as.numeric(py_to_r(tw$`get`("retweetCount"))))
-  reply    <- suppressWarnings(as.numeric(py_to_r(tw$`get`("replyCount"))))
-  quote    <- suppressWarnings(as.numeric(py_to_r(tw$`get`("quoteCount"))))
-  views    <- suppressWarnings(as.numeric(py_to_r(tw$`get`("viewCount"))))
-  
-  is_reply   <- !is.null(tw$`get`("inReplyToTweetId"))
-  is_quote   <- !is.null(tw$`get`("quotedTweet"))
-  is_retweet <- !is.null(tw$`get`("retweetedTweet"))
-  
-  tibble(
+  # tw is an R list (already py_to_r()-converted)
+  tags   <- tw$hashtags
+  ctags  <- tw$cashtags
+  in_usr <- tw$inReplyToUser
+  user_obj <- tw$user
+
+  hashtags <- if (!is.null(tags)  && length(tags))  stringr::str_c(unlist(tags),  collapse = ",") else NA_character_
+  cashtags <- if (!is.null(ctags) && length(ctags)) stringr::str_c(unlist(ctags), collapse = ",") else NA_character_
+
+  parent_user_username <- if (!is.null(in_usr) && !is.null(in_usr$username)) in_usr$username else NA_character_
+
+  id_str  <- as.character(tw$id %||% NA)
+  uid_str <- if (!is.null(user_obj) && !is.null(user_obj$id)) as.character(user_obj$id) else NA_character_
+
+  created <- tw$date %||% NA_character_
+  text    <- tw$rawContent %||% NA_character_
+
+  like    <- suppressWarnings(as.numeric(tw$likeCount    %||% NA))
+  retweet <- suppressWarnings(as.numeric(tw$retweetCount %||% NA))
+  reply   <- suppressWarnings(as.numeric(tw$replyCount   %||% NA))
+  quote   <- suppressWarnings(as.numeric(tw$quoteCount   %||% NA))
+  views   <- suppressWarnings(as.numeric(tw$viewCount    %||% NA))
+
+  tibble::tibble(
     username = user,
     tweet_id = id_str,
     tweet_url = sprintf("https://twitter.com/%s/status/%s", user, id_str),
-    user_id  = user_id,
+    user_id  = uid_str,
     created  = as.character(created),
     text     = text,
-    
     like     = like,
     retweet  = retweet,
     reply    = reply,
     quote    = quote,
     views    = views,
-    
     hashtags = hashtags,
     cashtags = cashtags,
-    
-    conversation_id      = as.character(py_to_r(tw$`get`("conversationId") %||% NA)),
-    parent_tweet_id      = as.character(py_to_r(tw$`get`("inReplyToTweetId") %||% NA)),
+    conversation_id      = as.character(tw$conversationId %||% NA),
+    parent_tweet_id      = as.character(tw$inReplyToTweetId %||% NA),
     parent_user_username = parent_user_username,
-    
-    is_reply   = is_reply,
-    is_quote   = is_quote,
-    is_retweet = is_retweet
+    is_reply   = !is.null(tw$inReplyToTweetId),
+    is_quote   = !is.null(tw$quotedTweet),
+    is_retweet = !is.null(tw$retweetedTweet)
   )
 }
 
-# scrape one handle → list of dicts → R list → rows --------------
+# scrape one handle → python list → safe dicts → R lists → rows --
 scrape_one <- function(user, limit = 100L) {
   tryCatch({
     info  <- asyncio$run(api$user_by_login(user))
     me_id <- as_chr(info$id)
-    
+
     # followers snapshot (global <<- append)
     followers_df <<- dplyr::bind_rows(
       followers_df,
-      tibble(
+      tibble::tibble(
         username        = user,
         user_id         = me_id,
         followers_count = as_num(info$followersCount),
         snapshot_time   = Sys.time()
       )
     )
-    
+
     tweets <- asyncio$run(
       twscrape$gather(api$user_tweets_and_replies(info$id, limit=as.integer(limit)))
     )
-    n_tw <- py_len(tweets)
+    n_tw <- reticulate::py_len(tweets)
     message(sprintf("✅ %s → %d tweets", user, n_tw))
     if (n_tw == 0) return(NULL)
-    
+
     # convert to safe dicts (avoid 32-bit int trouble) then to R
-    safe <- py$list_of_safe_dicts(tweets) |> py_to_r()
-    
-    purrr::map_dfr(safe, tweet_to_row, user = user)
+    safe_py <- pymain$list_of_safe_dicts(tweets)
+    safe_r  <- reticulate::py_to_r(safe_py)
+
+    purrr::map_dfr(safe_r, tweet_to_row, user = user)
   }, error = function(e) {
     message(sprintf("❌ %s → %s", user, conditionMessage(e)))
     NULL
@@ -165,17 +157,17 @@ scrape_one <- function(user, limit = 100L) {
 }
 
 # globals
-followers_df <- tibble(username=character(), user_id=character(),
-                       followers_count=numeric(), snapshot_time=as.POSIXct(character()))
+followers_df <- tibble::tibble(username=character(), user_id=character(),
+                               followers_count=numeric(), snapshot_time=as.POSIXct(character()))
 
 tidy_tbl <- purrr::map_dfr(handles, scrape_one)
 if (nrow(tidy_tbl) == 0) stop("No tweets scraped — aborting.")
 
 # Sort most recent first (helps the fix pass)
-tidy_tbl <- tidy_tbl |> arrange(username, desc(created))
+tidy_tbl <- tidy_tbl |> dplyr::arrange(username, dplyr::desc(created))
 
 # optional sanity flag for odd RT text patterns
-tidy_tbl <- tidy_tbl |> mutate(is_rt_text = str_detect(text %||% "", "^RT @"))
+tidy_tbl <- tidy_tbl |> dplyr::mutate(is_rt_text = stringr::str_detect(text %||% "", "^RT @"))
 
 ## 3b – fix conversation_id by handle (Regla 1/2) ----------------
 fix_conversation_id <- function(df) {
@@ -183,7 +175,7 @@ fix_conversation_id <- function(df) {
   cid <- df$conversation_id
   iq  <- df$is_quote
   idx <- which(iq & (seq_len(n) < n))  # every is_quote except last row
-  
+
   for (i in idx) {
     # Regla 2: if i+1 and i+2 share same cid, adopt cid[i+1] into row i
     if (i + 2 <= n && !is.na(cid[i+1]) && cid[i + 1] == cid[i + 2]) {
@@ -192,49 +184,43 @@ fix_conversation_id <- function(df) {
     # Regla 1: row below adopts (possibly corrected) cid[i]
     if (i + 1 <= n) cid[i + 1] <- cid[i]
   }
-  
+
   df$conversation_id <- cid
   df
 }
 
 tidy_fix <- tidy_tbl |>
-  group_by(username) |>
-  group_modify(~ fix_conversation_id(.x)) |>
-  ungroup()
+  dplyr::group_by(username) |>
+  dplyr::group_modify(~ fix_conversation_id(.x)) |>
+  dplyr::ungroup()
 
 ## 3c – collapse by conversation_id ------------------------------
 collapsed_tbl <- tidy_fix |>
-  group_by(conversation_id) |>
-  summarise(
-    username   = first(username),
-    created    = suppressWarnings(max(as_datetime(created), na.rm = TRUE)),
-    text       = str_c(text, collapse = "\n\n"),
+  dplyr::group_by(conversation_id) |>
+  dplyr::summarise(
+    username   = dplyr::first(username),
+    created    = suppressWarnings(max(lubridate::as_datetime(created), na.rm = TRUE)),
+    text       = stringr::str_c(text, collapse = "\n\n"),
     like       = sum(like,    na.rm = TRUE),
     retweet    = sum(retweet, na.rm = TRUE),
     reply      = sum(reply,   na.rm = TRUE),
     quote      = sum(quote,   na.rm = TRUE),
     views      = sum(views,   na.rm = TRUE),
-    n_tweets   = n(),
+    n_tweets   = dplyr::n(),
     .groups = "drop"
   ) |>
-  mutate(created = as.character(created))
-
-# (optional) local artifact for debugging
-# readr::write_csv(collapsed_tbl, "tweets_for_analysis.csv")
+  dplyr::mutate(created = as.character(created))
 
 ## 3d – compute cleaned engagement_rate on tidy tweets -----------
 tidy_fix <- tidy_fix |>
-  mutate(
-    high_er_flag = (reply + retweet + like + quote + views*0 + 0 +  # keep structure
-                      0) > views,                                     # original idea
-    suspicious_retweet = (ifelse(is.na(views) | views==0, NA_real_,
-                                 100*(reply+retweet+like+quote)/views) > 50) & is_retweet,
-    engagement_rate = dplyr::if_else(
-      high_er_flag | suspicious_retweet,
-      NA_real_,
-      ifelse(is.na(views) | views==0, NA_real_, 100*(reply+retweet+like+quote)/views)
-    )
-  )
+  dplyr::mutate(
+    high_er_flag = !is.na(views) & (reply + retweet + like + quote) > views,
+    er_calc = dplyr::if_else(is.na(views) | views == 0, NA_real_,
+                             100 * (reply + retweet + like + quote) / views),
+    suspicious_retweet = !is.na(er_calc) & (er_calc > 50) & is_retweet,
+    engagement_rate = dplyr::if_else(high_er_flag | suspicious_retweet, NA_real_, er_calc)
+  ) |>
+  dplyr::select(-er_calc)
 
 ## 4 – Supabase connection --------------------------------------
 supa_host <- Sys.getenv("SUPABASE_HOST")
@@ -279,7 +265,7 @@ DBI::dbExecute(con, "
   );
 ")
 
--- add any missing columns on older installs
+# add any missing columns on older installs
 invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS tweet_url text;") )
 invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS created timestamptz;") )
 invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS reply integer;") )
@@ -391,3 +377,8 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
+
+## 5 – wrap up ---------------------------------------------------
+DBI::dbDisconnect(con)
+message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
+
