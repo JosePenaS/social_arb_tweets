@@ -1,11 +1,8 @@
 #!/usr/bin/env Rscript
 # ---------------------------------------------------------------
-#  Scrape tweets for a set of handles and upsert into Supabase,
-#  plus snapshot follower counts to user_followers.
-#  Now includes:
-#   • expanded fields (hashtags/cashtags/threading flags)
-#   • conversation_id "fix" rules per handle
-#   • collapsed threads table (twitter_threads)
+#  Scrape tweets, wrangle (fix conversation ids + collapse),
+#  and upsert into Supabase: twitter_raw + twitter_threads
+#  Also snapshots follower counts into user_followers
 # ---------------------------------------------------------------
 
 ## 0 – packages --------------------------------------------------
@@ -25,8 +22,8 @@ if (!dir.exists(venv)) {
 }
 reticulate::use_virtualenv(venv, required = TRUE)
 
-twscrape <- import("twscrape", convert = FALSE)
-asyncio  <- import("asyncio",  convert = FALSE)
+twscrape <- reticulate::import("twscrape", convert = FALSE)
+asyncio  <- reticulate::import("asyncio",  convert = FALSE)
 api      <- twscrape$API()
 
 ## 1a – helpers to avoid 32-bit int issues ----------------------
@@ -37,7 +34,7 @@ INT32_MIN = -2_147_483_648
 
 def _fix_ints(obj):
     if isinstance(obj, int) and not (INT32_MIN <= obj <= INT32_MAX):
-        return str(obj)  # keep as str if it won't fit
+        return str(obj)
     if isinstance(obj, Mapping):
         return {k: _fix_ints(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
@@ -47,8 +44,6 @@ def _fix_ints(obj):
 def list_of_safe_dicts(tweets):
     return [_fix_ints(t.dict()) for t in tweets]
 ")
-
-# ← NEW: import the module where the functions above were defined
 pymain      <- reticulate::import("__main__", convert = FALSE)
 pybuiltins  <- reticulate::import_builtins()
 py_none     <- pybuiltins$None
@@ -73,9 +68,8 @@ handles <- trimws(strsplit(
 )[[1]])
 message("✅ Handles: ", paste(handles, collapse = ", "))
 
-# --- turn one Tweet (as an R list) into a tidy row --------------
+# one Tweet (R list) -> tidy row --------------------------------
 tweet_to_row <- function(tw, user) {
-  # tw is an R list (already py_to_r()-converted)
   tags   <- tw$hashtags
   ctags  <- tw$cashtags
   in_usr <- tw$inReplyToUser
@@ -83,7 +77,6 @@ tweet_to_row <- function(tw, user) {
 
   hashtags <- if (!is.null(tags)  && length(tags))  stringr::str_c(unlist(tags),  collapse = ",") else NA_character_
   cashtags <- if (!is.null(ctags) && length(ctags)) stringr::str_c(unlist(ctags), collapse = ",") else NA_character_
-
   parent_user_username <- if (!is.null(in_usr) && !is.null(in_usr$username)) in_usr$username else NA_character_
 
   id_str  <- as.character(tw$id %||% NA)
@@ -121,13 +114,13 @@ tweet_to_row <- function(tw, user) {
   )
 }
 
-# scrape one handle → python list → safe dicts → R lists → rows --
+# scrape one handle ---------------------------------------------
 scrape_one <- function(user, limit = 100L) {
   tryCatch({
     info  <- asyncio$run(api$user_by_login(user))
     me_id <- as_chr(info$id)
 
-    # followers snapshot (global <<- append)
+    # followers snapshot
     followers_df <<- dplyr::bind_rows(
       followers_df,
       tibble::tibble(
@@ -145,7 +138,6 @@ scrape_one <- function(user, limit = 100L) {
     message(sprintf("✅ %s → %d tweets", user, n_tw))
     if (n_tw == 0) return(NULL)
 
-    # convert to safe dicts (avoid 32-bit int trouble) then to R
     safe_py <- pymain$list_of_safe_dicts(tweets)
     safe_r  <- reticulate::py_to_r(safe_py)
 
@@ -156,35 +148,28 @@ scrape_one <- function(user, limit = 100L) {
   })
 }
 
-# globals
+# globals --------------------------------------------------------
 followers_df <- tibble::tibble(username=character(), user_id=character(),
                                followers_count=numeric(), snapshot_time=as.POSIXct(character()))
 
 tidy_tbl <- purrr::map_dfr(handles, scrape_one)
 if (nrow(tidy_tbl) == 0) stop("No tweets scraped — aborting.")
 
-# Sort most recent first (helps the fix pass)
-tidy_tbl <- tidy_tbl |> dplyr::arrange(username, dplyr::desc(created))
+# order + flags --------------------------------------------------
+tidy_tbl <- tidy_tbl |>
+  dplyr::arrange(username, dplyr::desc(created)) |>
+  dplyr::mutate(is_rt_text = stringr::str_detect(text %||% "", "^RT @"))
 
-# optional sanity flag for odd RT text patterns
-tidy_tbl <- tidy_tbl |> dplyr::mutate(is_rt_text = stringr::str_detect(text %||% "", "^RT @"))
-
-## 3b – fix conversation_id by handle (Regla 1/2) ----------------
+## fix conversation_id by handle (Regla 1/2) --------------------
 fix_conversation_id <- function(df) {
   n   <- nrow(df); if (!n) return(df)
   cid <- df$conversation_id
   iq  <- df$is_quote
-  idx <- which(iq & (seq_len(n) < n))  # every is_quote except last row
-
+  idx <- which(iq & (seq_len(n) < n))
   for (i in idx) {
-    # Regla 2: if i+1 and i+2 share same cid, adopt cid[i+1] into row i
-    if (i + 2 <= n && !is.na(cid[i+1]) && cid[i + 1] == cid[i + 2]) {
-      cid[i] <- cid[i + 1]
-    }
-    # Regla 1: row below adopts (possibly corrected) cid[i]
-    if (i + 1 <= n) cid[i + 1] <- cid[i]
+    if (i + 2 <= n && !is.na(cid[i+1]) && cid[i + 1] == cid[i + 2]) cid[i] <- cid[i + 1] # Regla 2
+    if (i + 1 <= n) cid[i + 1] <- cid[i]                                                  # Regla 1
   }
-
   df$conversation_id <- cid
   df
 }
@@ -194,24 +179,7 @@ tidy_fix <- tidy_tbl |>
   dplyr::group_modify(~ fix_conversation_id(.x)) |>
   dplyr::ungroup()
 
-## 3c – collapse by conversation_id ------------------------------
-collapsed_tbl <- tidy_fix |>
-  dplyr::group_by(conversation_id) |>
-  dplyr::summarise(
-    username   = dplyr::first(username),
-    created    = suppressWarnings(max(lubridate::as_datetime(created), na.rm = TRUE)),
-    text       = stringr::str_c(text, collapse = "\n\n"),
-    like       = sum(like,    na.rm = TRUE),
-    retweet    = sum(retweet, na.rm = TRUE),
-    reply      = sum(reply,   na.rm = TRUE),
-    quote      = sum(quote,   na.rm = TRUE),
-    views      = sum(views,   na.rm = TRUE),
-    n_tweets   = dplyr::n(),
-    .groups = "drop"
-  ) |>
-  dplyr::mutate(created = as.character(created))
-
-## 3d – compute cleaned engagement_rate on tidy tweets -----------
+## engagement rate (before renaming) ----------------------------
 tidy_fix <- tidy_fix |>
   dplyr::mutate(
     high_er_flag = !is.na(views) & (reply + retweet + like + quote) > views,
@@ -221,6 +189,33 @@ tidy_fix <- tidy_fix |>
     engagement_rate = dplyr::if_else(high_er_flag | suspicious_retweet, NA_real_, er_calc)
   ) |>
   dplyr::select(-er_calc)
+
+## rename ambiguous cols for SQL safety -------------------------
+tidy_fix <- tidy_fix |>
+  dplyr::rename(
+    like_count    = like,
+    retweet_count = retweet,
+    reply_count   = reply,
+    quote_count   = quote,
+    view_count    = views
+  )
+
+## collapse by conversation_id ----------------------------------
+collapsed_tbl <- tidy_fix |>
+  dplyr::group_by(conversation_id) |>
+  dplyr::summarise(
+    username      = dplyr::first(username),
+    created       = suppressWarnings(max(lubridate::as_datetime(created), na.rm = TRUE)),
+    text          = stringr::str_c(text, collapse = "\n\n"),
+    like_count    = sum(like_count,    na.rm = TRUE),
+    retweet_count = sum(retweet_count, na.rm = TRUE),
+    reply_count   = sum(reply_count,   na.rm = TRUE),
+    quote_count   = sum(quote_count,   na.rm = TRUE),
+    view_count    = sum(view_count,    na.rm = TRUE),
+    n_tweets      = dplyr::n(),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(created = as.character(created))
 
 ## 4 – Supabase connection --------------------------------------
 supa_host <- Sys.getenv("SUPABASE_HOST")
@@ -247,11 +242,11 @@ DBI::dbExecute(con, "
     user_id  text,
     created  timestamptz,
     text     text,
-    reply    integer,
-    retweet  integer,
-    like     integer,
-    quote    integer,
-    views    bigint,
+    reply_count   integer,
+    retweet_count integer,
+    like_count    integer,
+    quote_count   integer,
+    view_count    bigint,
     hashtags text,
     cashtags text,
     conversation_id text,
@@ -266,23 +261,23 @@ DBI::dbExecute(con, "
 ")
 
 # add any missing columns on older installs
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS tweet_url text;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS created timestamptz;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS reply integer;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS retweet integer;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS like integer;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS quote integer;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS views bigint;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS hashtags text;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS cashtags text;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS conversation_id text;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS parent_tweet_id text;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS parent_user_username text;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS is_reply boolean;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS is_quote boolean;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS is_retweet boolean;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS is_rt_text boolean;") )
-invisible( DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS engagement_rate numeric;") )
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS tweet_url text;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS created timestamptz;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS reply_count integer;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS retweet_count integer;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS like_count integer;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS quote_count integer;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS view_count bigint;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS hashtags text;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS cashtags text;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS conversation_id text;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS parent_tweet_id text;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS parent_user_username text;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS is_reply boolean;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS is_quote boolean;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS is_retweet boolean;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS is_rt_text boolean;"))
+invisible(DBI::dbExecute(con, "ALTER TABLE twitter_raw ADD COLUMN IF NOT EXISTS engagement_rate numeric;"))
 
 # stage → upsert
 DBI::dbWriteTable(con, "tmp_twitter_raw", tidy_fix, temporary = TRUE, overwrite = TRUE)
@@ -295,22 +290,23 @@ DBI::dbExecute(con, "
   )
   INSERT INTO twitter_raw AS t
     (tweet_id, tweet_url, username, user_id, created, text,
-     reply, retweet, like, quote, views,
+     reply_count, retweet_count, like_count, quote_count, view_count,
      hashtags, cashtags, conversation_id, parent_tweet_id, parent_user_username,
      is_reply, is_quote, is_retweet, is_rt_text, engagement_rate)
   SELECT tweet_id, tweet_url, username, user_id, created::timestamptz, text,
-         reply, retweet, like, quote, views,
+         reply_count::integer, retweet_count::integer, like_count::integer,
+         quote_count::integer, view_count::bigint,
          hashtags, cashtags, conversation_id, parent_tweet_id, parent_user_username,
          is_reply, is_quote, is_retweet, is_rt_text, engagement_rate
   FROM dedup
   ON CONFLICT (tweet_id) DO UPDATE SET
     tweet_url   = EXCLUDED.tweet_url,
     text        = EXCLUDED.text,
-    reply       = EXCLUDED.reply,
-    retweet     = EXCLUDED.retweet,
-    like        = EXCLUDED.like,
-    quote       = EXCLUDED.quote,
-    views       = EXCLUDED.views,
+    reply_count   = EXCLUDED.reply_count,
+    retweet_count = EXCLUDED.retweet_count,
+    like_count    = EXCLUDED.like_count,
+    quote_count   = EXCLUDED.quote_count,
+    view_count    = EXCLUDED.view_count,
     hashtags    = EXCLUDED.hashtags,
     cashtags    = EXCLUDED.cashtags,
     conversation_id = EXCLUDED.conversation_id,
@@ -332,12 +328,12 @@ DBI::dbExecute(con, "
     username   text,
     created    timestamptz,
     text       text,
-    like       bigint,
-    retweet    bigint,
-    reply      bigint,
-    quote      bigint,
-    views      bigint,
-    n_tweets   integer
+    like_count    bigint,
+    retweet_count bigint,
+    reply_count   bigint,
+    quote_count   bigint,
+    view_count    bigint,
+    n_tweets      integer
   );
 ")
 
@@ -345,19 +341,22 @@ DBI::dbWriteTable(con, "tmp_twitter_threads", collapsed_tbl, temporary = TRUE, o
 
 DBI::dbExecute(con, "
   INSERT INTO twitter_threads AS th
-    (conversation_id, username, created, text, like, retweet, reply, quote, views, n_tweets)
-  SELECT conversation_id, username, created::timestamptz, text, like, retweet, reply, quote, views, n_tweets
+    (conversation_id, username, created, text,
+     like_count, retweet_count, reply_count, quote_count, view_count, n_tweets)
+  SELECT conversation_id, username, created::timestamptz, text,
+         like_count::bigint, retweet_count::bigint, reply_count::bigint,
+         quote_count::bigint, view_count::bigint, n_tweets::integer
   FROM tmp_twitter_threads
   ON CONFLICT (conversation_id) DO UPDATE SET
-    username = EXCLUDED.username,
-    created  = EXCLUDED.created,
-    text     = EXCLUDED.text,
-    like     = EXCLUDED.like,
-    retweet  = EXCLUDED.retweet,
-    reply    = EXCLUDED.reply,
-    quote    = EXCLUDED.quote,
-    views    = EXCLUDED.views,
-    n_tweets = EXCLUDED.n_tweets;
+    username    = EXCLUDED.username,
+    created     = EXCLUDED.created,
+    text        = EXCLUDED.text,
+    like_count    = EXCLUDED.like_count,
+    retweet_count = EXCLUDED.retweet_count,
+    reply_count   = EXCLUDED.reply_count,
+    quote_count   = EXCLUDED.quote_count,
+    view_count    = EXCLUDED.view_count,
+    n_tweets    = EXCLUDED.n_tweets;
 ")
 
 DBI::dbExecute(con, "DROP TABLE IF EXISTS tmp_twitter_threads;")
@@ -377,8 +376,3 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
-
-## 5 – wrap up ---------------------------------------------------
-DBI::dbDisconnect(con)
-message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
-
