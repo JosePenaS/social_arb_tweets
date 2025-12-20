@@ -377,6 +377,3 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
 
-
-
-
