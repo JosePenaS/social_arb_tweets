@@ -200,9 +200,14 @@ scrape_one <- function(user, limit = 80L) {
     if (DEBUG) {
       message("🔎 RAW probe for: ", user)
       tryCatch({
-        gen  <- api$search_raw(paste0("from:", user), limit = 1L)
-        resp <- asyncio$run(gen$__anext__())
-        save_debug_response(resp, prefix = paste0("search_from_", user))
+gen <- api$search_raw(paste0("from:", user), limit = 1L)
+
+# safely call Python's async iterator next: await gen.__anext__()
+anext <- reticulate::py_get_attr(gen, "__anext__")
+resp  <- asyncio$run(anext())
+
+save_debug_response(resp, prefix = paste0("search_from_", user))
+
       }, error = function(e) {
         message("⚠️ RAW probe failed (maybe no search_raw in this version): ", conditionMessage(e))
       })
@@ -478,6 +483,7 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
+
 
 
 
