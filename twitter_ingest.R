@@ -80,21 +80,26 @@ save_debug_response <- function(resp, prefix = "twscrape") {
   dir.create("debug_http", showWarnings = FALSE, recursive = TRUE)
   ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
 
-  status <- tryCatch(reticulate::py_to_r(resp$status_code), error = function(e) NA)
-  url    <- tryCatch(reticulate::py_to_r(resp$url$__str__()), error = function(e) NA)
-  headers <- tryCatch(reticulate::py_to_r(resp$headers), error = function(e) NULL)
-  body   <- tryCatch(reticulate::py_to_r(resp$text), error = function(e) "")
+  status <- tryCatch(as.integer(reticulate::py_to_r(resp$status_code)), error = function(e) NA_integer_)
+  url    <- tryCatch(reticulate::py_str(resp$url),                         error = function(e) NA_character_)
+  headers <- tryCatch(reticulate::py_to_r(resp$headers),                   error = function(e) NULL)
+  body   <- tryCatch(reticulate::py_str(resp$text),                        error = function(e) "")
 
-  meta <- list(time=as.character(Sys.time()), status=status, url=url, headers=headers)
-  jsonlite::write_json(meta,
+  meta <- list(time = as.character(Sys.time()), status = status, url = url, headers = headers)
+
+  jsonlite::write_json(
+    meta,
     file.path("debug_http", paste0(prefix, "_", ts, "_meta.json")),
-    auto_unbox = TRUE, pretty = TRUE
+    auto_unbox = TRUE,
+    pretty = TRUE
   )
+
   writeLines(body, file.path("debug_http", paste0(prefix, "_", ts, ".html")))
 
   message("🧪 Saved debug HTML: status=", status, " url=", url,
           " (debug_http/", prefix, "_", ts, ".html)")
 }
+
 
 ## 2 – Add account (needs cookies) ------------------------------
 cookie_json <- Sys.getenv("TW_COOKIES_JSON")
@@ -473,6 +478,7 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
+
 
 
 
