@@ -3,6 +3,10 @@
 #  Scrape tweets, wrangle (fix conversation ids + collapse),
 #  and upsert into Supabase: twitter_raw + twitter_threads
 #  Also snapshots follower counts into user_followers
+#
+#  DEBUG additions:
+#   - TW_DEBUG=1 enables extra logging + raw HTML probes saved to ./debug_http/
+#   - TW_ACCOUNTS_DB lets you use a fresh accounts db file (avoid "already exists")
 # ---------------------------------------------------------------
 
 ## 0 – packages --------------------------------------------------
@@ -14,6 +18,9 @@ invisible(lapply(need, library, character.only = TRUE))
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
+## DEBUG toggle --------------------------------------------------
+DEBUG <- Sys.getenv("TW_DEBUG", "0") == "1"
+
 ## 1 – Python env & twscrape ------------------------------------
 venv <- Sys.getenv("PY_VENV_PATH", ".venv")
 if (!dir.exists(venv)) {
@@ -24,11 +31,28 @@ reticulate::use_virtualenv(venv, required = TRUE)
 
 twscrape <- reticulate::import("twscrape", convert = FALSE)
 asyncio  <- reticulate::import("asyncio",  convert = FALSE)
-api      <- twscrape$API()
+
+# Optional: keep accounts in a dedicated sqlite file so you can "start fresh"
+accounts_db <- Sys.getenv("TW_ACCOUNTS_DB", "accounts.db")
+api <- twscrape$API(accounts_db)
+
+# twscrape logging (if available)
+try({
+  logger <- reticulate::import("twscrape.logger", convert = FALSE)
+  logger$set_log_level(if (DEBUG) "DEBUG" else "INFO")
+}, silent = TRUE)
+
+if (DEBUG) {
+  message("🔎 Python: ", reticulate::py_config()$python)
+  message("🔎 twscrape version: ",
+          tryCatch(reticulate::py_eval("import twscrape; getattr(twscrape,'__version__','(no __version__)')"),
+                   error = function(e) "(unknown)"))
+  message("🔎 accounts DB: ", accounts_db)
+}
 
 ## 1a – helpers to avoid 32-bit int issues ----------------------
 reticulate::py_run_string("
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 INT32_MAX =  2_147_483_647
 INT32_MIN = -2_147_483_648
 
@@ -51,16 +75,57 @@ py_none     <- pybuiltins$None
 as_chr <- function(x) if (!identical(x, py_none)) reticulate::py_str(x) else NA_character_
 as_num <- function(x) if (!identical(x, py_none)) suppressWarnings(as.numeric(reticulate::py_str(x))) else NA_real_
 
+## Debug: save raw HTML responses (probe) ------------------------
+save_debug_response <- function(resp, prefix = "twscrape") {
+  dir.create("debug_http", showWarnings = FALSE, recursive = TRUE)
+  ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+  status <- tryCatch(reticulate::py_to_r(resp$status_code), error = function(e) NA)
+  url    <- tryCatch(reticulate::py_to_r(resp$url$__str__()), error = function(e) NA)
+  headers <- tryCatch(reticulate::py_to_r(resp$headers), error = function(e) NULL)
+  body   <- tryCatch(reticulate::py_to_r(resp$text), error = function(e) "")
+
+  meta <- list(time=as.character(Sys.time()), status=status, url=url, headers=headers)
+  jsonlite::write_json(meta,
+    file.path("debug_http", paste0(prefix, "_", ts, "_meta.json")),
+    auto_unbox = TRUE, pretty = TRUE
+  )
+  writeLines(body, file.path("debug_http", paste0(prefix, "_", ts, ".html")))
+
+  message("🧪 Saved debug HTML: status=", status, " url=", url,
+          " (debug_http/", prefix, "_", ts, ".html)")
+}
+
 ## 2 – Add account (needs cookies) ------------------------------
 cookie_json <- Sys.getenv("TW_COOKIES_JSON")
 if (cookie_json == "") stop("TW_COOKIES_JSON env var not set")
 
 cookies_list <- jsonlite::fromJSON(cookie_json)
 cookies_str  <- paste(paste0(cookies_list$name, "=", cookies_list$value), collapse = "; ")
-asyncio$run(api$pool$add_account("x","x","x","x", cookies=cookies_str))
+
+add_or_skip_account <- function(username = "x") {
+  tryCatch({
+    asyncio$run(api$pool$add_account(username, "x", "x", "x", cookies = cookies_str))
+    message("✅ Account added: ", username)
+  }, error = function(e) {
+    msg <- conditionMessage(e)
+    if (grepl("already exists", msg, ignore.case = TRUE)) {
+      message("ℹ️ Account already exists; continuing: ", username)
+    } else {
+      stop(e)
+    }
+  })
+}
+
+add_or_skip_account("x")
 
 message(sprintf("✅ %d cookies loaded, total chars = %d",
                 nrow(cookies_list), nchar(cookies_str)))
+
+if (DEBUG) {
+  message("🔎 pool attrs (first 40): ",
+          paste(head(reticulate::py_list_attributes(api$pool), 40), collapse = ", "))
+}
 
 ## 3 – scrape ----------------------------------------------------
 handles <- trimws(strsplit(
@@ -114,10 +179,38 @@ tweet_to_row <- function(tw, user) {
   )
 }
 
+# globals --------------------------------------------------------
+followers_df <- tibble::tibble(
+  username=character(),
+  user_id=character(),
+  followers_count=numeric(),
+  snapshot_time=as.POSIXct(character())
+)
+
 # scrape one handle ---------------------------------------------
 scrape_one <- function(user, limit = 80L) {
   tryCatch({
-    info  <- asyncio$run(api$user_by_login(user))
+
+    # DEBUG: raw probe to see what HTML X is serving (login/consent/antibot/etc)
+    if (DEBUG) {
+      message("🔎 RAW probe for: ", user)
+      tryCatch({
+        gen  <- api$search_raw(paste0("from:", user), limit = 1L)
+        resp <- asyncio$run(gen$__anext__())
+        save_debug_response(resp, prefix = paste0("search_from_", user))
+      }, error = function(e) {
+        message("⚠️ RAW probe failed (maybe no search_raw in this version): ", conditionMessage(e))
+      })
+    }
+
+    info <- tryCatch({
+      asyncio$run(api$user_by_login(user))
+    }, error = function(e) {
+      message("❌ user_by_login failed for ", user, ": ", conditionMessage(e))
+      if (DEBUG) message(reticulate::py_last_error())
+      stop(e)
+    })
+
     me_id <- as_chr(info$id)
 
     # followers snapshot
@@ -131,9 +224,16 @@ scrape_one <- function(user, limit = 80L) {
       )
     )
 
-    tweets <- asyncio$run(
-      twscrape$gather(api$user_tweets_and_replies(info$id, limit=as.integer(limit)))
-    )
+    tweets <- tryCatch({
+      asyncio$run(
+        twscrape$gather(api$user_tweets_and_replies(info$id, limit=as.integer(limit)))
+      )
+    }, error = function(e) {
+      message("❌ user_tweets_and_replies failed for ", user, ": ", conditionMessage(e))
+      if (DEBUG) message(reticulate::py_last_error())
+      stop(e)
+    })
+
     n_tw <- reticulate::py_len(tweets)
     message(sprintf("✅ %s → %d tweets", user, n_tw))
     if (n_tw == 0) return(NULL)
@@ -142,15 +242,12 @@ scrape_one <- function(user, limit = 80L) {
     safe_r  <- reticulate::py_to_r(safe_py)
 
     purrr::map_dfr(safe_r, tweet_to_row, user = user)
+
   }, error = function(e) {
     message(sprintf("❌ %s → %s", user, conditionMessage(e)))
     NULL
   })
 }
-
-# globals --------------------------------------------------------
-followers_df <- tibble::tibble(username=character(), user_id=character(),
-                               followers_count=numeric(), snapshot_time=as.POSIXct(character()))
 
 tidy_tbl <- purrr::map_dfr(handles, scrape_one)
 if (nrow(tidy_tbl) == 0) stop("No tweets scraped — aborting.")
@@ -376,4 +473,6 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
+
+
 
