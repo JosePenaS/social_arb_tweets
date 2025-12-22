@@ -5,13 +5,19 @@
 #  Also snapshots follower counts into user_followers
 #
 #  DEBUG additions:
-#   - TW_DEBUG=1 enables extra logging + raw HTML probes saved to ./debug_http/
+#   - TW_DEBUG=1 enables extra logging + HTML probes saved to ./debug_http/
 #   - TW_ACCOUNTS_DB lets you use a fresh accounts db file (avoid "already exists")
+#
+#  New fixes:
+#   - Fail-fast timeouts for async calls (prevents endless 15-min lock loops)
+#   - Direct HTML probe of https://x.com/<user> with your cookie header
 # ---------------------------------------------------------------
 
 ## 0 – packages --------------------------------------------------
-need <- c("reticulate","jsonlite","purrr","dplyr","lubridate",
-          "DBI","RPostgres","tibble","stringr","readr","tidyr")
+need <- c(
+  "reticulate","jsonlite","purrr","dplyr","lubridate",
+  "DBI","RPostgres","tibble","stringr","readr","tidyr","R.utils"
+)
 new  <- need[!need %in% rownames(installed.packages())]
 if (length(new)) install.packages(new, repos = "https://cloud.r-project.org")
 invisible(lapply(need, library, character.only = TRUE))
@@ -21,8 +27,18 @@ invisible(lapply(need, library, character.only = TRUE))
 ## DEBUG toggle --------------------------------------------------
 DEBUG <- Sys.getenv("TW_DEBUG", "0") == "1"
 
+## Fail-fast timeouts (prevents infinite waiting on CI) ----------
+with_timeout <- function(expr, seconds = 60) {
+  R.utils::withTimeout(expr, timeout = seconds, onTimeout = "error")
+}
+
+safe_run <- function(coro, seconds = 60) {
+  with_timeout(asyncio$run(coro), seconds = seconds)
+}
+
 ## 1 – Python env & twscrape ------------------------------------
-venv <- Sys.getenv("PY_VENV_PATH", ".venv")
+# Use a stable venv path so you don't recreate it every run
+venv <- Sys.getenv("PY_VENV_PATH", file.path(Sys.getenv("HOME"), ".virtualenvs", "twscrape"))
 if (!dir.exists(venv)) {
   reticulate::virtualenv_create(venv, python = NULL)
   reticulate::virtualenv_install(venv, "twscrape")
@@ -81,9 +97,9 @@ save_debug_response <- function(resp, prefix = "twscrape") {
   ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
 
   status <- tryCatch(as.integer(reticulate::py_to_r(resp$status_code)), error = function(e) NA_integer_)
-  url    <- tryCatch(reticulate::py_str(resp$url),                         error = function(e) NA_character_)
-  headers <- tryCatch(reticulate::py_to_r(resp$headers),                   error = function(e) NULL)
-  body   <- tryCatch(reticulate::py_str(resp$text),                        error = function(e) "")
+  url    <- tryCatch(reticulate::py_str(resp$url),                       error = function(e) NA_character_)
+  headers <- tryCatch(reticulate::py_to_r(resp$headers),                 error = function(e) NULL)
+  body   <- tryCatch(reticulate::py_str(resp$text),                      error = function(e) "")
 
   meta <- list(time = as.character(Sys.time()), status = status, url = url, headers = headers)
 
@@ -93,13 +109,39 @@ save_debug_response <- function(resp, prefix = "twscrape") {
     auto_unbox = TRUE,
     pretty = TRUE
   )
-
   writeLines(body, file.path("debug_http", paste0(prefix, "_", ts, ".html")))
 
   message("🧪 Saved debug HTML: status=", status, " url=", url,
           " (debug_http/", prefix, "_", ts, ".html)")
 }
 
+## 1b – Direct HTML probe via httpx (bypasses twscrape parser) ----
+reticulate::py_run_string("
+import httpx
+
+def fetch_url_with_cookies(url: str, cookies_header: str):
+    headers = {
+        'user-agent': 'Mozilla/5.0',
+        'cookie': cookies_header
+    }
+    with httpx.Client(follow_redirects=True, timeout=30) as client:
+        r = client.get(url, headers=headers)
+        return r
+")
+
+fetch_profile_html <- function(user, cookies_str) {
+  if (!DEBUG) return(invisible(NULL))
+  url <- paste0('https://x.com/', user)
+  resp <- tryCatch(
+    pymain$fetch_url_with_cookies(url, cookies_str),
+    error = function(e) {
+      message("⚠️ HTML probe failed for ", user, ": ", conditionMessage(e))
+      NULL
+    }
+  )
+  if (!is.null(resp)) save_debug_response(resp, prefix = paste0("profile_", user))
+  invisible(NULL)
+}
 
 ## 2 – Add account (needs cookies) ------------------------------
 cookie_json <- Sys.getenv("TW_COOKIES_JSON")
@@ -110,7 +152,7 @@ cookies_str  <- paste(paste0(cookies_list$name, "=", cookies_list$value), collap
 
 add_or_skip_account <- function(username = "x") {
   tryCatch({
-    asyncio$run(api$pool$add_account(username, "x", "x", "x", cookies = cookies_str))
+    safe_run(api$pool$add_account(username, "x", "x", "x", cookies = cookies_str), seconds = 30)
     message("✅ Account added: ", username)
   }, error = function(e) {
     msg <- conditionMessage(e)
@@ -196,30 +238,18 @@ followers_df <- tibble::tibble(
 scrape_one <- function(user, limit = 80L) {
   tryCatch({
 
-    # DEBUG: raw probe to see what HTML X is serving (login/consent/antibot/etc)
-    if (DEBUG) {
-      message("🔎 RAW probe for: ", user)
-      tryCatch({
-gen <- api$search_raw(paste0("from:", user), limit = 1L)
+    # DEBUG: fetch https://x.com/<user> directly and save HTML
+    fetch_profile_html(user, cookies_str)
 
-# safely call Python's async iterator next: await gen.__anext__()
-anext <- reticulate::py_get_attr(gen, "__anext__")
-resp  <- asyncio$run(anext())
-
-save_debug_response(resp, prefix = paste0("search_from_", user))
-
-      }, error = function(e) {
-        message("⚠️ RAW probe failed (maybe no search_raw in this version): ", conditionMessage(e))
-      })
-    }
-
-    info <- tryCatch({
-      asyncio$run(api$user_by_login(user))
-    }, error = function(e) {
-      message("❌ user_by_login failed for ", user, ": ", conditionMessage(e))
-      if (DEBUG) message(reticulate::py_last_error())
-      stop(e)
-    })
+    # Fail-fast: if twscrape is stuck in lock loops, timeout quickly
+    info <- tryCatch(
+      safe_run(api$user_by_login(user), seconds = 45),
+      error = function(e) {
+        message("❌ user_by_login failed for ", user, ": ", conditionMessage(e))
+        if (DEBUG) message(reticulate::py_last_error())
+        stop(e)
+      }
+    )
 
     me_id <- as_chr(info$id)
 
@@ -234,15 +264,17 @@ save_debug_response(resp, prefix = paste0("search_from_", user))
       )
     )
 
-    tweets <- tryCatch({
-      asyncio$run(
-        twscrape$gather(api$user_tweets_and_replies(info$id, limit=as.integer(limit)))
-      )
-    }, error = function(e) {
-      message("❌ user_tweets_and_replies failed for ", user, ": ", conditionMessage(e))
-      if (DEBUG) message(reticulate::py_last_error())
-      stop(e)
-    })
+    tweets <- tryCatch(
+      safe_run(
+        twscrape$gather(api$user_tweets_and_replies(info$id, limit=as.integer(limit))),
+        seconds = 90
+      ),
+      error = function(e) {
+        message("❌ user_tweets_and_replies failed for ", user, ": ", conditionMessage(e))
+        if (DEBUG) message(reticulate::py_last_error())
+        stop(e)
+      }
+    )
 
     n_tw <- reticulate::py_len(tweets)
     message(sprintf("✅ %s → %d tweets", user, n_tw))
@@ -483,6 +515,8 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
+
+
 
 
 
