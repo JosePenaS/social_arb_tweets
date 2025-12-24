@@ -41,16 +41,14 @@ jobs:
           TW_HANDLES:      ${{ vars.TW_HANDLES }}
 
           PY_VENV_PATH:    ".venv"
-
-          # ✅ enable debug output + HTML probes
           TW_DEBUG: "1"
         run: |
           Rscript twitter_ingest.R
 
-      # ✅ Always upload the debug folder (even if the script errors)
       - name: Upload debug HTML
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-http
           path: debug_http/
+          if-no-files-found: ignore
