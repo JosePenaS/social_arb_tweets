@@ -176,8 +176,10 @@ if (DEBUG) {
 
 ## 3 – scrape ----------------------------------------------------
 handles <- trimws(strsplit(
-  Sys.getenv("TW_HANDLES","aoTheComputer), ","
+  Sys.getenv("TW_HANDLES", "aoTheComputer,ar_io_network,samecwilliams"),
+  ","
 )[[1]])
+
 message("✅ Handles: ", paste(handles, collapse = ", "))
 
 # one Tweet (R list) -> tidy row --------------------------------
@@ -515,6 +517,7 @@ DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
+
 
 
 
