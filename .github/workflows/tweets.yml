@@ -41,7 +41,7 @@ jobs:
           TW_HANDLES:      ${{ vars.TW_HANDLES }}
 
           PY_VENV_PATH:    ".venv"
-          TW_DEBUG: "1"
+          TW_DEBUG: "0"
         run: |
           Rscript twitter_ingest.R
 
