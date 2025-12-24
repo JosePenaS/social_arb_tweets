@@ -4,13 +4,13 @@
 #  and upsert into Supabase: twitter_raw + twitter_threads
 #  Also snapshots follower counts into user_followers
 #
-#  DEBUG additions:
+#  DEBUG additions (Option B - fixed probe):
 #   - TW_DEBUG=1 enables extra logging + HTML probes saved to ./debug_http/
-#   - TW_ACCOUNTS_DB lets you use a fresh accounts db file (avoid "already exists")
+#   - Probe now returns a plain Python dict (R list) so jsonlite never sees a
+#     python.builtin.object (fixes: "No method asJSON S3 class: python.builtin.object")
 #
-#  New fixes:
-#   - Fail-fast timeouts for async calls (prevents endless 15-min lock loops)
-#   - Direct HTML probe of https://x.com/<user> with your cookie header
+#  Other fixes:
+#   - Fail-fast timeouts for async calls (prevents endless lock loops on CI)
 # ---------------------------------------------------------------
 
 ## 0 – packages --------------------------------------------------
@@ -39,6 +39,10 @@ safe_run <- function(coro, seconds = 60) {
 ## 1 – Python env & twscrape ------------------------------------
 # Use a stable venv path so you don't recreate it every run
 venv <- Sys.getenv("PY_VENV_PATH", file.path(Sys.getenv("HOME"), ".virtualenvs", "twscrape"))
+
+# Ensure ~/.virtualenvs exists if you use the default
+if (!dir.exists(dirname(venv))) dir.create(dirname(venv), recursive = TRUE, showWarnings = FALSE)
+
 if (!dir.exists(venv)) {
   reticulate::virtualenv_create(venv, python = NULL)
   reticulate::virtualenv_install(venv, "twscrape")
@@ -61,8 +65,10 @@ try({
 if (DEBUG) {
   message("🔎 Python: ", reticulate::py_config()$python)
   message("🔎 twscrape version: ",
-          tryCatch(reticulate::py_eval("import twscrape; getattr(twscrape,'__version__','(no __version__)')"),
-                   error = function(e) "(unknown)"))
+          tryCatch(
+            reticulate::py_eval("import twscrape; getattr(twscrape,'__version__','(no __version__)')"),
+            error = function(e) "(unknown)"
+          ))
   message("🔎 accounts DB: ", accounts_db)
 }
 
@@ -92,16 +98,23 @@ as_chr <- function(x) if (!identical(x, py_none)) reticulate::py_str(x) else NA_
 as_num <- function(x) if (!identical(x, py_none)) suppressWarnings(as.numeric(reticulate::py_str(x))) else NA_real_
 
 ## Debug: save raw HTML responses (probe) ------------------------
+# NOTE: resp is expected to be a python dict, which we convert to an R list
 save_debug_response <- function(resp, prefix = "twscrape") {
   dir.create("debug_http", showWarnings = FALSE, recursive = TRUE)
   ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
 
-  status <- tryCatch(as.integer(reticulate::py_to_r(resp$status_code)), error = function(e) NA_integer_)
-  url    <- tryCatch(reticulate::py_str(resp$url),                       error = function(e) NA_character_)
-  headers <- tryCatch(reticulate::py_to_r(resp$headers),                 error = function(e) NULL)
-  body   <- tryCatch(reticulate::py_str(resp$text),                      error = function(e) "")
+  resp_r <- tryCatch(reticulate::py_to_r(resp), error = function(e) NULL)
+  if (is.null(resp_r)) {
+    message("⚠️ Could not convert debug response to R.")
+    return(invisible(NULL))
+  }
 
-  meta <- list(time = as.character(Sys.time()), status = status, url = url, headers = headers)
+  meta <- list(
+    time    = as.character(Sys.time()),
+    status  = resp_r$status_code %||% NA_integer_,
+    url     = resp_r$url %||% NA_character_,
+    headers = resp_r$headers %||% list()
+  )
 
   jsonlite::write_json(
     meta,
@@ -109,13 +122,18 @@ save_debug_response <- function(resp, prefix = "twscrape") {
     auto_unbox = TRUE,
     pretty = TRUE
   )
-  writeLines(body, file.path("debug_http", paste0(prefix, "_", ts, ".html")))
 
-  message("🧪 Saved debug HTML: status=", status, " url=", url,
-          " (debug_http/", prefix, "_", ts, ".html)")
+  writeLines(
+    resp_r$text %||% "",
+    file.path("debug_http", paste0(prefix, "_", ts, ".html"))
+  )
+
+  message("🧪 Saved debug HTML: status=", meta$status, " url=", meta$url)
+  invisible(NULL)
 }
 
 ## 1b – Direct HTML probe via httpx (bypasses twscrape parser) ----
+# IMPORTANT: return a *plain dict* (status/url/headers/text), not a Response object.
 reticulate::py_run_string("
 import httpx
 
@@ -126,12 +144,18 @@ def fetch_url_with_cookies(url: str, cookies_header: str):
     }
     with httpx.Client(follow_redirects=True, timeout=30) as client:
         r = client.get(url, headers=headers)
-        return r
+        return {
+            'status_code': int(r.status_code),
+            'url': str(r.url),
+            'headers': dict(r.headers),
+            'text': r.text
+        }
 ")
 
 fetch_profile_html <- function(user, cookies_str) {
   if (!DEBUG) return(invisible(NULL))
-  url <- paste0('https://x.com/', user)
+  url <- paste0("https://x.com/", user)
+
   resp <- tryCatch(
     pymain$fetch_url_with_cookies(url, cookies_str),
     error = function(e) {
@@ -139,6 +163,7 @@ fetch_profile_html <- function(user, cookies_str) {
       NULL
     }
   )
+
   if (!is.null(resp)) save_debug_response(resp, prefix = paste0("profile_", user))
   invisible(NULL)
 }
@@ -179,6 +204,9 @@ handles <- trimws(strsplit(
   Sys.getenv("TW_HANDLES", "aoTheComputer,ar_io_network,samecwilliams"),
   ","
 )[[1]])
+
+# drop blanks if someone left trailing commas
+handles <- handles[nzchar(handles)]
 
 message("✅ Handles: ", paste(handles, collapse = ", "))
 
@@ -243,7 +271,6 @@ scrape_one <- function(user, limit = 80L) {
     # DEBUG: fetch https://x.com/<user> directly and save HTML
     fetch_profile_html(user, cookies_str)
 
-    # Fail-fast: if twscrape is stuck in lock loops, timeout quickly
     info <- tryCatch(
       safe_run(api$user_by_login(user), seconds = 45),
       error = function(e) {
@@ -512,13 +539,12 @@ DBI::dbExecute(con, "
     PRIMARY KEY (user_id, snapshot_time)
   );
 ")
+
 DBI::dbWriteTable(con, "user_followers", followers_df, append = TRUE, row.names = FALSE)
 
 ## 5 – wrap up ---------------------------------------------------
 DBI::dbDisconnect(con)
 message("✅ Tweets (raw + threads) & follower counts upserted at ", Sys.time())
-
-
 
 
 
