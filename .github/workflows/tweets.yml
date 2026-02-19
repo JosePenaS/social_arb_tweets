@@ -1,4 +1,4 @@
-name: Scrape Tweets to Supabase
+name: Scrape Tweets (X API) to Supabase
 
 on:
   schedule:
@@ -22,33 +22,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential libpq-dev libssl-dev \
-            libcurl4-openssl-dev libxml2-dev \
-            python3-dev python3-venv libpng-dev zlib1g-dev
+            libcurl4-openssl-dev libxml2-dev
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Run twitter_ingest.R
+      - name: Run twitter_ingest_xapi.R
         env:
-          SUPABASE_HOST:   ${{ secrets.SUPABASE_HOST }}
-          SUPABASE_PORT:   ${{ secrets.SUPABASE_PORT }}
-          SUPABASE_DB:     ${{ secrets.SUPABASE_DB }}
-          SUPABASE_USER:   ${{ secrets.SUPABASE_USER }}
-          SUPABASE_PWD:    ${{ secrets.SUPABASE_PWD }}
+          # X API
+          X_BEARER: ${{ secrets.X_BEARER }}
 
-          TW_COOKIES_JSON: ${{ secrets.TW_COOKIES_JSON }}
-          TW_HANDLES:      ${{ vars.TW_HANDLES }}
+          # Optional: time window (if you set these as repo variables or secrets)
+          # If not set, script defaults to last 24h UTC
+          X_START_TIME: ${{ vars.X_START_TIME }}
+          X_END_TIME:   ${{ vars.X_END_TIME }}
 
-          PY_VENV_PATH:    ".venv"
-          TW_DEBUG: "0"
+          # Handles list (repo variable)
+          TW_HANDLES: ${{ vars.TW_HANDLES }}
+
+          # Supabase (prefer secrets)
+          SUPABASE_HOST:        ${{ secrets.SUPABASE_HOST }}
+          SUPABASE_PORT:        ${{ secrets.SUPABASE_PORT }}
+          SUPABASE_DB:          ${{ secrets.SUPABASE_DB }}
+          SUPABASE_USER:        ${{ secrets.SUPABASE_USER }}
+          SUPABASE_PWD:         ${{ secrets.SUPABASE_PWD }}
+
+          # Optional if you connect via pooler host explicitly in the script
+          SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
+
         run: |
-          Rscript twitter_ingest.R
-
-      - name: Upload debug HTML
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-http
-          path: debug_http/
-          if-no-files-found: ignore
+          Rscript twitter_ingest_xapi.R
