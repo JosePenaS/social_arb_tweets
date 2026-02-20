@@ -27,7 +27,7 @@ if (SUPABASE_HOST == "") stop("Missing env var: SUPABASE_HOST")
 if (SUPABASE_USER == "") stop("Missing env var: SUPABASE_USER")
 if (SUPABASE_PWD  == "") stop("Missing env var: SUPABASE_PWD")
 
-# Optional: override the pooler host/user format you were using
+# Optional: override the pooler host you were using
 SUPABASE_POOLER_HOST <- Sys.getenv("SUPABASE_POOLER_HOST", "aws-0-us-east-2.pooler.supabase.com")
 
 # Handles list (comma-separated) OR fallback list
@@ -38,19 +38,49 @@ handles <- trimws(strsplit(Sys.getenv(
 handles <- handles[nzchar(handles)]
 if (length(handles) == 0) stop("No handles provided")
 
-# Time window (ISO Z). If not provided, default last 24h ending now.
+message("✅ Handles: ", paste(handles, collapse = ", "))
+
+# ── Time window (manual override or anchored auto window) ────────────────────
 end_time   <- Sys.getenv("X_END_TIME")
 start_time <- Sys.getenv("X_START_TIME")
 
-if (end_time == "" || start_time == "") {
-  et <- with_tz(Sys.time(), "UTC")
-  st <- et - hours(24)
-  end_time   <- format(et, "%Y-%m-%dT%H:%M:%SZ")
-  start_time <- format(st, "%Y-%m-%dT%H:%M:%SZ")
+compute_window <- function(tz = "America/New_York") {
+  now_local <- with_tz(Sys.time(), tz)
+
+  today_0900 <- as.POSIXct(paste0(as.Date(now_local), " 09:00:00"), tz = tz)
+  today_1630 <- as.POSIXct(paste0(as.Date(now_local), " 16:30:00"), tz = tz)
+  yday_1630  <- today_1630 - days(1)
+
+  # If we're before 09:00 → scrape from yesterday 16:30 → now
+  # If we're between 09:00 and 16:30 → scrape from today 09:00 → now
+  # If we're after 16:30 → scrape from today 16:30 → now
+  start_local <- if (now_local < today_0900) {
+    yday_1630
+  } else if (now_local < today_1630) {
+    today_0900
+  } else {
+    today_1630
+  }
+
+  list(
+    start_time  = format(with_tz(start_local, "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
+    end_time    = format(with_tz(now_local,  "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
+    start_local = start_local,
+    end_local   = now_local
+  )
 }
 
-message("✅ Handles: ", paste(handles, collapse = ", "))
-message("✅ Window:  ", start_time, " → ", end_time)
+if (!nzchar(end_time) || !nzchar(start_time)) {
+  tz_used <- Sys.getenv("LOCAL_TZ", "America/New_York")
+  w <- compute_window(tz = tz_used)
+  start_time <- w$start_time
+  end_time   <- w$end_time
+  message("✅ Window local: ", w$start_local, " → ", w$end_local, " (", tz_used, ")")
+} else {
+  message("✅ Window override (env): ", start_time, " → ", end_time)
+}
+
+message("✅ Window UTC:   ", start_time, " → ", end_time)
 
 # ── 1) LOOKUP USER IDS ───────────────────────────────────────────────────────
 x_lookup_user_ids <- function(usernames, bearer) {
@@ -87,14 +117,12 @@ x_get_user_tweets_window <- function(user_id, bearer, start_time, end_time,
 
   base <- paste0("https://api.x.com/2/users/", user_id, "/tweets")
 
-  # Request the fields you use later
   query <- list(
-    start_time   = start_time,
-    end_time     = end_time,
-    max_results  = "100",
+    start_time     = start_time,
+    end_time       = end_time,
+    max_results    = "100",
     `tweet.fields` = "id,created_at,text,conversation_id,referenced_tweets",
-    # We'll infer quote/retweet/reply from referenced_tweets
-    exclude      = if (include_retweets) NULL else "retweets"
+    exclude        = if (include_retweets) NULL else "retweets"
   )
 
   out <- list()
@@ -146,7 +174,6 @@ x_get_user_tweets_window <- function(user_id, bearer, start_time, end_time,
 }
 
 infer_flags <- function(refs) {
-  # refs is list of {type,id} entries, or empty
   if (length(refs) == 0) {
     return(list(is_reply = FALSE, is_quote = FALSE, is_retweet = FALSE))
   }
@@ -192,7 +219,6 @@ posts_all <- pmap_dfr(
 
     if (nrow(res) == 0) return(empty_posts)
 
-    # add flags + is_rt_text
     res2 <- res %>%
       rowwise() %>%
       mutate(tmp = list(infer_flags(referenced_tweets)),
@@ -207,14 +233,13 @@ posts_all <- pmap_dfr(
       ) %>%
       select(-tmp)
 
-    # force schema if needed
     if (nrow(res2) == 0) empty_posts else res2
   }
 )
 
 posts_all <- posts_all %>% arrange(desc(created_at))
 
-# ── 3) tweets_db (your transformation) ───────────────────────────────────────
+# ── 3) tweets_db ─────────────────────────────────────────────────────────────
 tweets_db <- posts_all %>%
   transmute(
     tweet_id         = as.character(id),
@@ -232,7 +257,7 @@ tweets_db <- posts_all %>%
 
 if (nrow(tweets_db) == 0) stop("No tweets fetched — aborting.")
 
-# ── 4) fix conversation_id (same as your earlier function) ──────────────────
+# ── 4) fix conversation_id ───────────────────────────────────────────────────
 fix_conversation_id <- function(df) {
   n <- nrow(df); if (!n) return(df)
   cid <- df$conversation_id
@@ -251,9 +276,8 @@ tidy_fix <- tweets_db %>%
   group_modify(~ fix_conversation_id(.x)) %>%
   ungroup()
 
-# ── 5) Collapse conversations (your logic) ───────────────────────────────────
+# ── 5) Collapse conversations ────────────────────────────────────────────────
 collapsed_tbl <- tidy_fix %>%
-  # avoid NA conversation_id collapsing into one monster row
   filter(!is.na(conversation_id), nzchar(conversation_id)) %>%
   group_by(conversation_id) %>%
   summarise(
@@ -275,7 +299,7 @@ collapse_db <- collapsed_tbl %>%
   ) %>%
   distinct(collapse_id, .keep_all = TRUE)
 
-# ── 6) Supabase upserts: twitter_raw_v2 + twitter_collapse_full ──────────────
+# ── 6) Supabase upserts ──────────────────────────────────────────────────────
 con <- dbConnect(
   RPostgres::Postgres(),
   host     = SUPABASE_POOLER_HOST,
@@ -287,7 +311,7 @@ con <- dbConnect(
 )
 on.exit(dbDisconnect(con), add = TRUE)
 
-dbGetQuery(con, "select '✅ connected' as status, now();") |> print()
+print(dbGetQuery(con, "select '✅ connected' as status, now();"))
 
 # twitter_raw_v2
 dbExecute(con, "
@@ -372,11 +396,3 @@ dbExecute(con, "
 dbExecute(con, "DROP TABLE IF EXISTS tmp_twitter_collapse_full;")
 
 message("✅ Done. Upserted twitter_raw_v2 + twitter_collapse_full at ", Sys.time())
-
- 
-  
-
-
-
-
-
