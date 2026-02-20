@@ -3,7 +3,7 @@ name: Scrape Tweets (X API) to Supabase
 on:
   schedule:
     - cron: '0 14 * * *'
-    - cron: '30 20 * * *'
+    - cron: '30 21 * * *'
   workflow_dispatch:
 
 jobs:
