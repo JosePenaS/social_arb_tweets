@@ -24,7 +24,7 @@ jobs:
             build-essential libpq-dev libssl-dev \
             libcurl4-openssl-dev libxml2-dev
 
-      - name: Run twitter_ingest_xapi.R
+      - name: Run twitter_ingest.R
         env:
           # X API
           X_BEARER: ${{ secrets.X_BEARER }}
@@ -48,4 +48,4 @@ jobs:
           SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
 
         run: |
-          Rscript twitter_ingest_xapi.R
+          Rscript twitter_ingest.R
