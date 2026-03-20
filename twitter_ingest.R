@@ -17,18 +17,15 @@ suppressPackageStartupMessages({
 BEARER <- Sys.getenv("X_BEARER")
 if (BEARER == "") stop("Missing env var: X_BEARER")
 
-SUPABASE_HOST <- Sys.getenv("SUPABASE_HOST")
 SUPABASE_PORT <- as.integer(Sys.getenv("SUPABASE_PORT", "5432"))
 SUPABASE_DB   <- Sys.getenv("SUPABASE_DB", "postgres")
 SUPABASE_USER <- Sys.getenv("SUPABASE_USER")
 SUPABASE_PWD  <- Sys.getenv("SUPABASE_PWD")
+SUPABASE_POOLER_HOST <- Sys.getenv("SUPABASE_POOLER_HOST")
 
-if (SUPABASE_HOST == "") stop("Missing env var: SUPABASE_HOST")
-if (SUPABASE_USER == "") stop("Missing env var: SUPABASE_USER")
-if (SUPABASE_PWD  == "") stop("Missing env var: SUPABASE_PWD")
-
-# Optional: override the pooler host you were using
-SUPABASE_POOLER_HOST <- Sys.getenv("SUPABASE_POOLER_HOST", "aws-0-us-east-2.pooler.supabase.com")
+if (!nzchar(SUPABASE_POOLER_HOST)) stop("Missing env var: SUPABASE_POOLER_HOST")
+if (!nzchar(SUPABASE_USER)) stop("Missing env var: SUPABASE_USER")
+if (!nzchar(SUPABASE_PWD))  stop("Missing env var: SUPABASE_PWD")
 
 # Handles list (comma-separated) OR fallback list
 handles <- trimws(strsplit(Sys.getenv(
