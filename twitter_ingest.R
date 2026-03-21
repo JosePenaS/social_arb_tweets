@@ -48,9 +48,6 @@ compute_window <- function(tz = "America/New_York") {
   today_1630 <- as.POSIXct(paste0(as.Date(now_local), " 16:30:00"), tz = tz)
   yday_1630  <- today_1630 - days(1)
 
-  # If we're before 09:00 → scrape from yesterday 16:30 → now
-  # If we're between 09:00 and 16:30 → scrape from today 09:00 → now
-  # If we're after 16:30 → scrape from today 16:30 → now
   start_local <- if (now_local < today_0900) {
     yday_1630
   } else if (now_local < today_1630) {
@@ -218,15 +215,17 @@ posts_all <- pmap_dfr(
 
     res2 <- res %>%
       rowwise() %>%
-      mutate(tmp = list(infer_flags(referenced_tweets)),
-             is_reply   = tmp$is_reply,
-             is_quote   = tmp$is_quote,
-             is_retweet = tmp$is_retweet) %>%
+      mutate(
+        tmp = list(infer_flags(referenced_tweets)),
+        is_reply   = tmp$is_reply,
+        is_quote   = tmp$is_quote,
+        is_retweet = tmp$is_retweet
+      ) %>%
       ungroup() %>%
       mutate(
         is_rt_text = str_detect(text %||% "", "^RT @"),
-        username = uname,
-        user_id = uid
+        username   = uname,
+        user_id    = uid
       ) %>%
       select(-tmp)
 
@@ -256,14 +255,18 @@ if (nrow(tweets_db) == 0) stop("No tweets fetched — aborting.")
 
 # ── 4) fix conversation_id ───────────────────────────────────────────────────
 fix_conversation_id <- function(df) {
-  n <- nrow(df); if (!n) return(df)
+  n <- nrow(df)
+  if (!n) return(df)
+
   cid <- df$conversation_id
   iq  <- df$is_quote
   idx <- which(iq & (seq_len(n) < n))
+
   for (i in idx) {
-    if (i + 2 <= n && !is.na(cid[i+1]) && cid[i + 1] == cid[i + 2]) cid[i] <- cid[i + 1]
+    if (i + 2 <= n && !is.na(cid[i + 1]) && cid[i + 1] == cid[i + 2]) cid[i] <- cid[i + 1]
     if (i + 1 <= n) cid[i + 1] <- cid[i]
   }
+
   df$conversation_id <- cid
   df
 }
@@ -326,6 +329,36 @@ dbExecute(con, "
   );
 ")
 
+dbExecute(con, "
+  ALTER TABLE public.twitter_raw_v2
+  ADD COLUMN IF NOT EXISTS user_id text;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_raw_v2
+  ADD COLUMN IF NOT EXISTS conversation_id text;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_raw_v2
+  ADD COLUMN IF NOT EXISTS is_reply boolean;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_raw_v2
+  ADD COLUMN IF NOT EXISTS is_quote boolean;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_raw_v2
+  ADD COLUMN IF NOT EXISTS is_retweet boolean;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_raw_v2
+  ADD COLUMN IF NOT EXISTS is_rt_text boolean;
+")
+
 dbWriteTable(con, "tmp_twitter_raw_v2", tweets_db, temporary = TRUE, overwrite = TRUE)
 
 dbExecute(con, "
@@ -367,6 +400,31 @@ dbExecute(con, "
     text            text,
     n_tweets        integer
   );
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_collapse_full
+  ADD COLUMN IF NOT EXISTS conversation_id text;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_collapse_full
+  ADD COLUMN IF NOT EXISTS username text;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_collapse_full
+  ADD COLUMN IF NOT EXISTS created_at timestamptz;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_collapse_full
+  ADD COLUMN IF NOT EXISTS text text;
+")
+
+dbExecute(con, "
+  ALTER TABLE public.twitter_collapse_full
+  ADD COLUMN IF NOT EXISTS n_tweets integer;
 ")
 
 dbWriteTable(con, "tmp_twitter_collapse_full", collapse_db, temporary = TRUE, overwrite = TRUE)
