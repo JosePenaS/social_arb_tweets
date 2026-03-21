@@ -2,15 +2,8 @@ name: Scrape Tweets + Generate Signals (Supabase)
 
 on:
   schedule:
-    # GitHub cron is UTC.
-    # These cover 09:00 and 15:30 New York time across DST by running both UTC variants.
-    # Mon–Fri only.
-    #
-    # During EST (UTC-5): 09:00 ET = 14:00 UTC, 15:30 ET = 20:30 UTC
     - cron: '0 14 * * 1-5'
     - cron: '30 20 * * 1-5'
-    #
-    # During EDT (UTC-4): 09:00 ET = 13:00 UTC, 15:30 ET = 19:30 UTC
     - cron: '0 13 * * 1-5'
     - cron: '30 19 * * 1-5'
   workflow_dispatch:
@@ -48,39 +41,42 @@ jobs:
             any::jsonlite
             any::httr2
 
+      - name: Debug env presence
+        env:
+          SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
+          SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
+          X_BEARER: ${{ secrets.X_BEARER }}
+        run: |
+          echo "SUPABASE_POOLER_HOST set? $([ -n "$SUPABASE_POOLER_HOST" ] && echo yes || echo no)"
+          echo "SUPABASE_USER set? $([ -n "$SUPABASE_USER" ] && echo yes || echo no)"
+          echo "X_BEARER set? $([ -n "$X_BEARER" ] && echo yes || echo no)"
+
       - name: 1) Scrape + upsert tweets (twitter_ingest.R)
         env:
           X_BEARER: ${{ secrets.X_BEARER }}
           TW_HANDLES: ${{ vars.TW_HANDLES }}
-
-          # Make your window logic DST-safe inside R
           LOCAL_TZ: America/New_York
-
-          # Supabase (pooler)
           SUPABASE_PORT: ${{ secrets.SUPABASE_PORT }}
-          SUPABASE_DB:   ${{ secrets.SUPABASE_DB }}
+          SUPABASE_DB: ${{ secrets.SUPABASE_DB }}
           SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
-          SUPABASE_PWD:  ${{ secrets.SUPABASE_PWD }}
-          SUPABASE_POOLER_HOST: ${{ vars.SUPABASE_POOLER_HOST }}
+          SUPABASE_PWD: ${{ secrets.SUPABASE_PWD }}
+          SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
         run: |
           Rscript twitter_ingest.R
 
       - name: 2) Generate + upsert signals (generate_tweet_signals.R)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
           LOCAL_TZ: America/New_York
           SIGNALS_LOOKBACK_MINUTES: ${{ vars.SIGNALS_LOOKBACK_MINUTES }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
           OPENAI_TEMPERATURE: ${{ vars.OPENAI_TEMPERATURE }}
           OPENAI_MAX_TOKENS: ${{ vars.OPENAI_MAX_TOKENS }}
-
-          # Supabase (pooler)
           SUPABASE_PORT: ${{ secrets.SUPABASE_PORT }}
-          SUPABASE_DB:   ${{ secrets.SUPABASE_DB }}
+          SUPABASE_DB: ${{ secrets.SUPABASE_DB }}
           SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
-          SUPABASE_PWD:  ${{ secrets.SUPABASE_PWD }}
-          SUPABASE_POOLER_HOST: ${{ vars.SUPABASE_POOLER_HOST }}
+          SUPABASE_PWD: ${{ secrets.SUPABASE_PWD }}
+          SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
         run: |
           Rscript generate_tweet_signals.R
 
