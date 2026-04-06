@@ -301,7 +301,9 @@ if (nrow(signals_from_tweets) == 0) {
     LGHNH="003550.KS", `LGHNH.KS`="003550.KS", `EL.F`="EL.PA",
     DOCK="DOCK.L", `FOI-B`="FOI-B.ST", GAW="GAW.L", OIL="USO",
     SP500="^GSPC", NASDAQ="^IXIC", BTC.X="BTC-USD", FB="META",
-    ADYEN="ADYEN.AS", RPI="RPI.L", PUIG="PUIG.MC", ASMDEE_B="ASMDEE-B.ST"
+    ADYEN="ADYEN.AS", RPI="RPI.L", PUIG="PUIG.MC", ASMDEE_B="ASMDEE-B.ST", 
+    BLONDESNMONEY = NA,YELLOWBRICK = NA,OPENAI=NA,
+    TRYCREATE = NA, SFER ="SFER.MI",  PPGN=  "PPGN.SW" ,NUR.V="NUR.CV",WSJ=NA
   )
   if (sym %in% names(stock_map)) return(unname(stock_map[sym]))
 
@@ -324,7 +326,7 @@ signals_from_tweets <- signals_from_tweets %>%
       "FIGR",
       ticker
     )
-  ) %>%
+  ) %>%  filter(ticker!="GOTR") %>%
   filter(!is.na(ticker), nzchar(ticker))
 
 if (nrow(signals_from_tweets) == 0) {
