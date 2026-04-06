@@ -32,11 +32,21 @@ if (!nzchar(SUPABASE_USER)) stop("Missing env var: SUPABASE_USER")
 if (!nzchar(SUPABASE_PWD))  stop("Missing env var: SUPABASE_PWD")
 
 # Optional tuning
-LOCAL_TZ <- Sys.getenv("LOCAL_TZ", "America/New_York")
-LOOKBACK_MINUTES <- as.integer(Sys.getenv("SIGNALS_LOOKBACK_MINUTES", "120"))
-OPENAI_MODEL <- Sys.getenv("OPENAI_MODEL", "gpt-4o-mini")  # cheaper default for automation
-TEMPERATURE <- as.numeric(Sys.getenv("OPENAI_TEMPERATURE", "0"))
-MAX_TOKENS <- as.integer(Sys.getenv("OPENAI_MAX_TOKENS", "1700"))
+env_or_default <- function(name, default) {
+  x <- trimws(Sys.getenv(name, unset = ""))
+  if (!nzchar(x)) default else x
+}
+
+LOCAL_TZ <- env_or_default("LOCAL_TZ", "America/New_York")
+LOOKBACK_MINUTES <- as.integer(env_or_default("SIGNALS_LOOKBACK_MINUTES", "120"))
+OPENAI_MODEL <- env_or_default("OPENAI_MODEL", "gpt-4o-mini")
+TEMPERATURE <- as.numeric(env_or_default("OPENAI_TEMPERATURE", "0"))
+MAX_TOKENS <- as.integer(env_or_default("OPENAI_MAX_TOKENS", "1700"))
+
+if (is.na(LOOKBACK_MINUTES)) stop("SIGNALS_LOOKBACK_MINUTES resolved to NA")
+if (!nzchar(OPENAI_MODEL)) stop("OPENAI_MODEL is blank")
+if (is.na(TEMPERATURE)) stop("OPENAI_TEMPERATURE is invalid")
+if (is.na(MAX_TOKENS)) stop("OPENAI_MAX_TOKENS is invalid")
 
 message("✅ Using TZ = ", LOCAL_TZ, " | lookback = ", LOOKBACK_MINUTES, " minutes")
 message("✅ OpenAI model = ", OPENAI_MODEL)
