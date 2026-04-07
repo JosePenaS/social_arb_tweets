@@ -12,6 +12,7 @@ suppressPackageStartupMessages({
   library(glue)
   library(jsonlite)
   library(httr2)
+  library(tidyquant)
 })
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
@@ -25,7 +26,6 @@ SUPABASE_DB   <- Sys.getenv("SUPABASE_DB", "postgres")
 SUPABASE_USER <- Sys.getenv("SUPABASE_USER")
 SUPABASE_PWD  <- Sys.getenv("SUPABASE_PWD")
 
-# IMPORTANT: in your X-ingest script you used a pooler host
 SUPABASE_POOLER_HOST <- Sys.getenv(
   "SUPABASE_POOLER_HOST",
   "aws-0-us-east-2.pooler.supabase.com"
@@ -34,7 +34,6 @@ SUPABASE_POOLER_HOST <- Sys.getenv(
 if (!nzchar(SUPABASE_USER)) stop("Missing env var: SUPABASE_USER")
 if (!nzchar(SUPABASE_PWD))  stop("Missing env var: SUPABASE_PWD")
 
-# Optional tuning
 env_or_default <- function(name, default) {
   x <- trimws(Sys.getenv(name, unset = ""))
   if (!nzchar(x)) default else x
@@ -55,6 +54,7 @@ message("✅ Using TZ = ", LOCAL_TZ, " | lookback = ", LOOKBACK_MINUTES, " minut
 message("✅ OpenAI model = ", OPENAI_MODEL)
 message("✅ httr2 version = ", as.character(packageVersion("httr2")))
 message("✅ tidyr version = ", as.character(packageVersion("tidyr")))
+message("✅ tidyquant version = ", as.character(packageVersion("tidyquant")))
 
 # ── 1) CONNECT SUPABASE ──────────────────────────────────────────────────────
 con <- dbConnect(
@@ -169,6 +169,14 @@ rationale (<= 60 words),
 specificity_score (0-1), has_quant_data (bool),
 evidence_score (0-1), evidence_types (comma tags),
 evidence_snippet (<=30 words, or empty if none).
+
+IMPORTANT RULES FOR ticker:
+- ticker must be the official exchange-traded symbol only
+- never include a leading $
+- never return words like UNKNOWN, brand names, product names, themes, sectors, or company descriptions
+- only return a ticker if it is a real tradable symbol
+- if the tweet discusses a product or brand but the company/ticker is not clear, drop the idea
+- if no valid ticker exists, do not guess
 
 Drop weak ideas: if no ticker OR specificity_score < 0.30.
 If no valid ideas remain, return {{\"signals\": []}}.
@@ -304,11 +312,50 @@ if (nrow(signals_from_tweets) == 0) {
   quit(status = 0)
 }
 
-# ── 7) TICKER FIXES ──────────────────────────────────────────────────────────
-.fix_one <- function(sym) {
+# ── 7) TICKER CLEANUP + FIXES + VALIDATION ───────────────────────────────────
+normalize_raw_ticker <- function(sym) {
   if (is.na(sym) || !nzchar(sym)) return(NA_character_)
 
-  sym <- str_to_upper(sym)
+  sym %>%
+    str_to_upper() %>%
+    str_trim() %>%
+    str_remove("^\\$+") %>%
+    str_replace_all("\\s+", "") %>%
+    str_replace_all("^[^A-Z0-9\\^]+", "") %>%
+    str_replace_all("[^A-Z0-9\\.\\-\\^]+$", "")
+}
+
+is_valid_symbol <- local({
+  cache <- new.env(parent = emptyenv())
+
+  function(sym) {
+    if (is.na(sym) || !nzchar(sym)) return(FALSE)
+
+    key <- paste0("k_", sym)
+    if (exists(key, envir = cache, inherits = FALSE)) {
+      return(get(key, envir = cache, inherits = FALSE))
+    }
+
+    out <- tryCatch(
+      tidyquant::tq_get(
+        sym,
+        get = "stock.prices",
+        from = Sys.Date() - 30,
+        to   = Sys.Date(),
+        complete_cases = TRUE
+      ),
+      error = function(e) tibble::tibble()
+    )
+
+    ok <- nrow(out) > 0
+    assign(key, ok, envir = cache)
+    ok
+  }
+})
+
+.fix_one <- function(sym) {
+  sym <- normalize_raw_ticker(sym)
+  if (is.na(sym) || !nzchar(sym)) return(NA_character_)
 
   stock_map <- c(
     CROCS="CROX", TDMX="TMDX", ATZ="ATZ.TO", PUMA="PUM.DE",
@@ -326,7 +373,8 @@ if (nrow(signals_from_tweets) == 0) {
     SP500="^GSPC", NASDAQ="^IXIC", BTC.X="BTC-USD", FB="META",
     ADYEN="ADYEN.AS", RPI="RPI.L", PUIG="PUIG.MC", ASMDEE_B="ASMDEE-B.ST",
     BLONDESNMONEY=NA, YELLOWBRICK=NA, OPENAI=NA,
-    TRYCREATE=NA, SFER="SFER.MI", PPGN="PPGN.SW", `NUR.V`="NUR.CV", WSJ=NA
+    TRYCREATE=NA, SFER="SFER.MI", PPGN="PPGN.SW", `NUR.V`="NUR.CV", WSJ=NA,
+    UNKNOWN=NA, UNK=NA, NONE=NA, NULL=NA, `N/A`=NA
   )
 
   if (sym %in% names(stock_map)) return(unname(stock_map[sym]))
@@ -336,7 +384,7 @@ if (nrow(signals_from_tweets) == 0) {
 
   skip_syms <- c(
     "TICKERPLUS","TIPRANKS","TRUMP","TRENDS","FIGUREAI",
-    "APPTRONIK","OPENSEA","MRBEAST"
+    "APPTRONIK","OPENSEA","MRBEAST","NUTELLA","NEEDOH"
   )
   if (sym %in% skip_syms) return(NA_character_)
 
@@ -349,18 +397,38 @@ fix_ticker <- function(sym_vec) {
 
 signals_from_tweets <- signals_from_tweets %>%
   mutate(
+    ticker_raw = ticker,
     ticker = fix_ticker(ticker),
     ticker = if_else(
       is.na(ticker) & str_detect(text, "\\bFIGR\\b"),
       "FIGR",
       ticker
+    ),
+    valid_ticker = map_lgl(
+      ticker,
+      ~ !is.na(.x) && nzchar(.x) && is_valid_symbol(.x)
     )
-  ) %>%
+  )
+
+dropped_tickers <- signals_from_tweets %>%
+  filter(is.na(ticker) | !valid_ticker) %>%
+  distinct(username, conversation_id, ticker_raw, ticker, text)
+
+if (nrow(dropped_tickers) > 0) {
+  message("⚠️ Dropped invalid/non-tradable tickers: ", nrow(dropped_tickers))
+  print(
+    dropped_tickers %>% select(username, ticker_raw, ticker),
+    n = min(nrow(dropped_tickers), 20)
+  )
+}
+
+signals_from_tweets <- signals_from_tweets %>%
+  filter(!is.na(ticker), nzchar(ticker), valid_ticker) %>%
   filter(ticker != "GOTR") %>%
-  filter(!is.na(ticker), nzchar(ticker))
+  select(-ticker_raw, -valid_ticker)
 
 if (nrow(signals_from_tweets) == 0) {
-  message("✅ All signals dropped after ticker normalization. Exiting.")
+  message("✅ All signals dropped after ticker normalization/validation. Exiting.")
   quit(status = 0)
 }
 
@@ -435,6 +503,4 @@ dbExecute(con, "
 dbExecute(con, "DROP TABLE IF EXISTS tmp_twitter_trade_signals;")
 
 message("✅ Done. Upserted ", nrow(signals_db), " signals at ", Sys.time())
-
-
 
