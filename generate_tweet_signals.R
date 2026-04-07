@@ -26,7 +26,10 @@ SUPABASE_USER <- Sys.getenv("SUPABASE_USER")
 SUPABASE_PWD  <- Sys.getenv("SUPABASE_PWD")
 
 # IMPORTANT: in your X-ingest script you used a pooler host
-SUPABASE_POOLER_HOST <- Sys.getenv("SUPABASE_POOLER_HOST", "aws-0-us-east-2.pooler.supabase.com")
+SUPABASE_POOLER_HOST <- Sys.getenv(
+  "SUPABASE_POOLER_HOST",
+  "aws-0-us-east-2.pooler.supabase.com"
+)
 
 if (!nzchar(SUPABASE_USER)) stop("Missing env var: SUPABASE_USER")
 if (!nzchar(SUPABASE_PWD))  stop("Missing env var: SUPABASE_PWD")
@@ -37,11 +40,11 @@ env_or_default <- function(name, default) {
   if (!nzchar(x)) default else x
 }
 
-LOCAL_TZ <- env_or_default("LOCAL_TZ", "America/New_York")
+LOCAL_TZ         <- env_or_default("LOCAL_TZ", "America/New_York")
 LOOKBACK_MINUTES <- as.integer(env_or_default("SIGNALS_LOOKBACK_MINUTES", "120"))
-OPENAI_MODEL <- env_or_default("OPENAI_MODEL", "gpt-4o-mini")
-TEMPERATURE <- as.numeric(env_or_default("OPENAI_TEMPERATURE", "0"))
-MAX_TOKENS <- as.integer(env_or_default("OPENAI_MAX_TOKENS", "1700"))
+OPENAI_MODEL     <- env_or_default("OPENAI_MODEL", "gpt-4o-mini")
+TEMPERATURE      <- as.numeric(env_or_default("OPENAI_TEMPERATURE", "0"))
+MAX_TOKENS       <- as.integer(env_or_default("OPENAI_MAX_TOKENS", "1700"))
 
 if (is.na(LOOKBACK_MINUTES)) stop("SIGNALS_LOOKBACK_MINUTES resolved to NA")
 if (!nzchar(OPENAI_MODEL)) stop("OPENAI_MODEL is blank")
@@ -50,6 +53,8 @@ if (is.na(MAX_TOKENS)) stop("OPENAI_MAX_TOKENS is invalid")
 
 message("✅ Using TZ = ", LOCAL_TZ, " | lookback = ", LOOKBACK_MINUTES, " minutes")
 message("✅ OpenAI model = ", OPENAI_MODEL)
+message("✅ httr2 version = ", as.character(packageVersion("httr2")))
+message("✅ tidyr version = ", as.character(packageVersion("tidyr")))
 
 # ── 1) CONNECT SUPABASE ──────────────────────────────────────────────────────
 con <- dbConnect(
@@ -89,8 +94,7 @@ dbExecute(con, "
   );
 ")
 
-# ── 3) PULL ONLY NEW THREADS ────────────────────────────────────────────────
-# Use max(created_at) in twitter_trade_signals as watermark, minus lookback buffer
+# ── 3) PULL ONLY NEW THREADS ─────────────────────────────────────────────────
 last_ts <- dbGetQuery(con, "
   SELECT COALESCE(MAX(created_at), '1970-01-01'::timestamptz) AS last_ts
   FROM public.twitter_trade_signals;
@@ -100,7 +104,6 @@ cutoff <- as.POSIXct(last_ts, tz = "UTC") - minutes(LOOKBACK_MINUTES)
 message("✅ Watermark UTC: ", as.character(last_ts))
 message("✅ Cutoff   UTC: ", as.character(cutoff))
 
-# Read from collapsed threads table
 collapsed_tbl3 <- dbGetQuery(
   con,
   "SELECT conversation_id, username, created_at, text, n_tweets
@@ -118,15 +121,15 @@ if (nrow(collapsed_tbl3) == 0) {
 
 message("✅ Threads to process: ", nrow(collapsed_tbl3))
 
-# ── 4) ADD ET TIME (AUTOMATE YOUR tbl_et STEP) ───────────────────────────────
+# ── 4) ADD LOCAL TIME ────────────────────────────────────────────────────────
 tbl_et <- collapsed_tbl3 %>%
   mutate(
     created_utc = as.POSIXct(created_at, tz = "UTC"),
     created_et  = with_tz(created_utc, tzone = LOCAL_TZ)
   )
 
-# ── 5) PROMPT + OPENAI CALL ─────────────────────────────────────────────────
-expected_schema <- tibble::tibble(
+# ── 5) PROMPT + OPENAI CALL ──────────────────────────────────────────────────
+expected_schema <- tibble(
   ticker            = character(),
   conviction        = numeric(),
   direction         = character(),
@@ -142,12 +145,14 @@ expected_schema <- tibble::tibble(
   evidence_snippet  = character()
 )
 
+empty_signals <- expected_schema[0, ]
+
 make_tweet_prompt <- function(tweet_text) {
   safe_txt <- tweet_text |>
-    stringr::str_replace_all("\\{", "{{") |>
-    stringr::str_replace_all("\\}", "}}")
+    str_replace_all("\\{", "{{") |>
+    str_replace_all("\\}", "}}")
 
-  glue::glue("
+  glue("
 You are a trading assistant that converts a single tweet into a strict JSON trade-idea list.
 
 TWEET
@@ -194,24 +199,33 @@ ask_openai <- function(prompt,
         list(role = "system", content = system_prompt),
         list(role = "user", content = prompt)
       )
-    ))
+    )) |>
+    req_timeout(120)
 
   for (k in seq_len(retries)) {
-    resp <- tryCatch(req_perform(req, timeout = 120), error = identity)
+    resp <- tryCatch(
+      req_perform(req),
+      error = identity
+    )
 
     if (inherits(resp, "error")) {
-      message("⚠️ OpenAI HTTP error: ", resp$message)
+      message("⚠️ OpenAI HTTP error: ", conditionMessage(resp))
     } else {
-      if (resp_status(resp) == 200) {
-        js <- resp_body_json(resp, simplifyVector = FALSE)
-        txt <- js$choices[[1]]$message$content %||% ""
-        if (nzchar(txt)) return(str_trim(txt))
+      js <- tryCatch(
+        resp_body_json(resp, simplifyVector = FALSE),
+        error = function(e) NULL
+      )
+
+      txt <- js$choices[[1]]$message$content %||% ""
+
+      if (nzchar(txt)) {
+        return(str_trim(txt))
       } else {
-        message("⚠️ OpenAI status ", resp_status(resp), ": ", resp_body_string(resp))
+        message("⚠️ OpenAI returned empty content.")
       }
     }
 
-    Sys.sleep(2^k) # exponential backoff
+    Sys.sleep(2^k)
   }
 
   NA_character_
@@ -226,26 +240,33 @@ tweets_signals <- tbl_et %>%
   transmute(
     conversation_id,
     username,
-    created_at,      # UTC (db)
+    created_at,
     created_et,
     text
   ) %>%
   mutate(
-    prompt = map_chr(text, make_tweet_prompt),
+    prompt  = map_chr(text, make_tweet_prompt),
     gpt_raw = map_chr(prompt, safe_ask)
   )
 
-# ── 6) PARSE JSON TO TABLES ─────────────────────────────────────────────────
+# ── 6) PARSE JSON TO TABLES ──────────────────────────────────────────────────
 parse_one <- function(txt) {
-  if (is.na(txt) || !nzchar(txt)) return(tibble())
-  out <- tryCatch(
-    jsonlite::fromJSON(txt)$signals %>% tibble::as_tibble(),
-    error = function(e) tibble()
+  if (is.na(txt) || !nzchar(txt)) return(empty_signals)
+
+  parsed <- tryCatch(
+    jsonlite::fromJSON(txt, simplifyVector = TRUE),
+    error = function(e) NULL
   )
 
-  if (nrow(out) == 0) return(tibble())
+  if (is.null(parsed) || is.null(parsed$signals)) return(empty_signals)
 
-  # Fill missing fields (schema safety)
+  out <- tryCatch(
+    tibble::as_tibble(parsed$signals),
+    error = function(e) empty_signals
+  )
+
+  if (nrow(out) == 0) return(empty_signals)
+
   missing <- setdiff(names(expected_schema), names(out))
   if (length(missing)) {
     for (nm in missing) {
@@ -259,7 +280,8 @@ parse_one <- function(txt) {
       conviction        = pmin(pmax(as.numeric(conviction), 0), 1),
       direction         = as.character(direction),
       horizon           = as.character(horizon),
-      stop_loss_pct     = as.integer(pmin(pmax(as.integer(stop_loss_pct), 8), 25)),
+      stop_loss_pct     = suppressWarnings(as.integer(stop_loss_pct)),
+      stop_loss_pct     = as.integer(pmin(pmax(stop_loss_pct, 8), 25)),
       buy_zone          = as.logical(buy_zone),
       sentiment_score   = pmin(pmax(as.numeric(sentiment_score), -1), 1),
       rationale         = as.character(rationale),
@@ -273,18 +295,19 @@ parse_one <- function(txt) {
 
 signals_from_tweets <- tweets_signals %>%
   mutate(gpt_table = map(gpt_raw, parse_one)) %>%
-  select(username, conversation_id, created_et, text, gpt_table) %>%
+  select(username, conversation_id, created_at, created_et, text, gpt_table) %>%
   tidyr::unnest(gpt_table) %>%
   filter(!is.na(ticker), nzchar(ticker))
 
-# If nothing parsed, exit cleanly
 if (nrow(signals_from_tweets) == 0) {
   message("✅ No valid signals parsed from new threads. Exiting.")
   quit(status = 0)
 }
 
-# ── 7) TICKER FIXES (YOUR MAPPING) ──────────────────────────────────────────
+# ── 7) TICKER FIXES ──────────────────────────────────────────────────────────
 .fix_one <- function(sym) {
+  if (is.na(sym) || !nzchar(sym)) return(NA_character_)
+
   sym <- str_to_upper(sym)
 
   stock_map <- c(
@@ -301,22 +324,28 @@ if (nrow(signals_from_tweets) == 0) {
     LGHNH="003550.KS", `LGHNH.KS`="003550.KS", `EL.F`="EL.PA",
     DOCK="DOCK.L", `FOI-B`="FOI-B.ST", GAW="GAW.L", OIL="USO",
     SP500="^GSPC", NASDAQ="^IXIC", BTC.X="BTC-USD", FB="META",
-    ADYEN="ADYEN.AS", RPI="RPI.L", PUIG="PUIG.MC", ASMDEE_B="ASMDEE-B.ST", 
-    BLONDESNMONEY = NA,YELLOWBRICK = NA,OPENAI=NA,
-    TRYCREATE = NA, SFER ="SFER.MI",  PPGN=  "PPGN.SW" ,NUR.V="NUR.CV",WSJ=NA
+    ADYEN="ADYEN.AS", RPI="RPI.L", PUIG="PUIG.MC", ASMDEE_B="ASMDEE-B.ST",
+    BLONDESNMONEY=NA, YELLOWBRICK=NA, OPENAI=NA,
+    TRYCREATE=NA, SFER="SFER.MI", PPGN="PPGN.SW", `NUR.V`="NUR.CV", WSJ=NA
   )
+
   if (sym %in% names(stock_map)) return(unname(stock_map[sym]))
 
   crypto_keep <- c("BTC","ETH","DOGE","SHIB","SOL","XRP","ADA","AVAX","LINK","DOT")
   if (sym %in% crypto_keep) return(paste0(sym, "-USD"))
 
-  skip_syms <- c("TICKERPLUS","TIPRANKS","TRUMP","TRENDS","FIGUREAI","APPTRONIK","OPENSEA","MRBEAST")
+  skip_syms <- c(
+    "TICKERPLUS","TIPRANKS","TRUMP","TRENDS","FIGUREAI",
+    "APPTRONIK","OPENSEA","MRBEAST"
+  )
   if (sym %in% skip_syms) return(NA_character_)
 
   sym
 }
 
-fix_ticker <- function(sym_vec) vapply(sym_vec, .fix_one, character(1))
+fix_ticker <- function(sym_vec) {
+  vapply(sym_vec, .fix_one, character(1))
+}
 
 signals_from_tweets <- signals_from_tweets %>%
   mutate(
@@ -326,7 +355,8 @@ signals_from_tweets <- signals_from_tweets %>%
       "FIGR",
       ticker
     )
-  ) %>%  filter(ticker!="GOTR") %>%
+  ) %>%
+  filter(ticker != "GOTR") %>%
   filter(!is.na(ticker), nzchar(ticker))
 
 if (nrow(signals_from_tweets) == 0) {
@@ -337,32 +367,37 @@ if (nrow(signals_from_tweets) == 0) {
 # ── 8) BUILD signal_id + UPSERT ─────────────────────────────────────────────
 signals_db <- signals_from_tweets %>%
   transmute(
-    signal_id        = paste0(username, ":", conversation_id, ":", ticker, ":", format(created_et, "%Y%m%d%H%M%S")),
-    username         = as.character(username),
-    conversation_id  = as.character(conversation_id),
-
-    # created_at stored as timestamptz; convert ET instant to UTC instant
-    created_at       = with_tz(as.POSIXct(created_et, tz = LOCAL_TZ), "UTC"),
-
-    text             = as.character(text),
-    ticker           = as.character(ticker),
-    conviction       = as.numeric(conviction),
-    direction        = as.character(direction),
-    horizon          = as.character(horizon),
-    stop_loss_pct    = as.integer(stop_loss_pct),
-    buy_zone         = as.logical(buy_zone),
-    sentiment_score  = as.numeric(sentiment_score),
-    rationale        = as.character(rationale),
-    specificity_score= as.numeric(specificity_score),
-    has_quant_data   = as.logical(has_quant_data),
-    evidence_score   = as.numeric(evidence_score),
-    evidence_types   = as.character(evidence_types),
-    evidence_snippet = as.character(evidence_snippet)
+    signal_id = paste0(
+      username, ":", conversation_id, ":", ticker, ":",
+      format(created_et, "%Y%m%d%H%M%S")
+    ),
+    username          = as.character(username),
+    conversation_id   = as.character(conversation_id),
+    created_at        = with_tz(as.POSIXct(created_et, tz = LOCAL_TZ), "UTC"),
+    text              = as.character(text),
+    ticker            = as.character(ticker),
+    conviction        = as.numeric(conviction),
+    direction         = as.character(direction),
+    horizon           = as.character(horizon),
+    stop_loss_pct     = as.integer(stop_loss_pct),
+    buy_zone          = as.logical(buy_zone),
+    sentiment_score   = as.numeric(sentiment_score),
+    rationale         = as.character(rationale),
+    specificity_score = as.numeric(specificity_score),
+    has_quant_data    = as.logical(has_quant_data),
+    evidence_score    = as.numeric(evidence_score),
+    evidence_types    = as.character(evidence_types),
+    evidence_snippet  = as.character(evidence_snippet)
   ) %>%
   distinct(signal_id, .keep_all = TRUE)
 
-# temp table + upsert
-dbWriteTable(con, "tmp_twitter_trade_signals", signals_db, temporary = TRUE, overwrite = TRUE)
+dbWriteTable(
+  con,
+  "tmp_twitter_trade_signals",
+  signals_db,
+  temporary = TRUE,
+  overwrite = TRUE
+)
 
 dbExecute(con, "
   INSERT INTO public.twitter_trade_signals AS t
@@ -400,8 +435,6 @@ dbExecute(con, "
 dbExecute(con, "DROP TABLE IF EXISTS tmp_twitter_trade_signals;")
 
 message("✅ Done. Upserted ", nrow(signals_db), " signals at ", Sys.time())
-
-
 
 
 
