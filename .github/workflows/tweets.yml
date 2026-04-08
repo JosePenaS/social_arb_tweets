@@ -40,6 +40,7 @@ jobs:
             any::glue
             any::jsonlite
             any::httr2
+            any::tidyquant
 
       - name: Debug env presence
         env:
@@ -79,4 +80,3 @@ jobs:
           SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
         run: |
           Rscript generate_tweet_signals.R
-
