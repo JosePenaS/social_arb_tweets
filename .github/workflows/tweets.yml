@@ -1,15 +1,22 @@
-name: Scrape Tweets + Generate Signals (Supabase)
+name: Scrape Tweets + Generate Signals + Refresh Backtest (Supabase)
 
 on:
   schedule:
+    # Existing intraday schedules
     - cron: '0 14 * * 1-5'
     - cron: '30 20 * * 1-5'
     - cron: '0 13 * * 1-5'
     - cron: '30 19 * * 1-5'
+
+    # Midnight America/New_York (covers EST and EDT)
+    - cron: '0 5 * * *'
+    - cron: '0 4 * * *'
+
   workflow_dispatch:
 
 jobs:
   pipeline:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 14 * * 1-5' || github.event.schedule == '30 20 * * 1-5' || github.event.schedule == '0 13 * * 1-5' || github.event.schedule == '30 19 * * 1-5' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -80,3 +87,56 @@ jobs:
           SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
         run: |
           Rscript generate_tweet_signals.R
+
+  refresh_backtest:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 5 * * *' || github.event.schedule == '0 4 * * *' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.3'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libpq-dev libssl-dev \
+            libcurl4-openssl-dev libxml2-dev
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::DBI
+            any::RPostgres
+            any::dplyr
+            any::purrr
+            any::tibble
+            any::stringr
+            any::lubridate
+            any::tidyr
+            any::glue
+            any::jsonlite
+            any::zoo
+            any::TTR
+
+      - name: Debug env presence
+        env:
+          SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
+          SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
+        run: |
+          echo "SUPABASE_POOLER_HOST set? $([ -n "$SUPABASE_POOLER_HOST" ] && echo yes || echo no)"
+          echo "SUPABASE_USER set? $([ -n "$SUPABASE_USER" ] && echo yes || echo no)"
+
+      - name: 3) Refresh incomplete + new backtest rows
+        env:
+          LOCAL_TZ: America/New_York
+          SUPABASE_PORT: ${{ secrets.SUPABASE_PORT }}
+          SUPABASE_DB: ${{ secrets.SUPABASE_DB }}
+          SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
+          SUPABASE_PWD: ${{ secrets.SUPABASE_PWD }}
+          SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
+        run: |
+          Rscript refresh_backtest_results.R
