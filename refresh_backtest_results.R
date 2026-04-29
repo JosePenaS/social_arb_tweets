@@ -363,6 +363,83 @@ simulate_trade <- function(ticker,
   
   entry_below_sma10 <- if_else(!is.na(entry_sma), entry_price < entry_sma, NA)
   
+  # ------------------------------------------------------------------
+  # Individual stock features known before/at entry
+  # ------------------------------------------------------------------
+  
+  entry_idx <- match(entry_date, px_full$date)
+  
+  enough_sma10_history <- !is.na(entry_idx) && entry_idx > 10
+  enough_5d_history    <- !is.na(entry_idx) && entry_idx > 5
+  enough_20d_history   <- !is.na(entry_idx) && entry_idx > 20
+  young_stock_flag     <- !is.na(entry_idx) && entry_idx <= 20
+  
+  sma10_prior <- if (enough_sma10_history) {
+    mean(px_full$close[(entry_idx - 10):(entry_idx - 1)], na.rm = TRUE)
+  } else {
+    NA_real_
+  }
+  
+  dist_sma10 <- if (!is.na(sma10_prior) && sma10_prior > 0) {
+    entry_price / sma10_prior - 1
+  } else {
+    NA_real_
+  }
+  
+  ret_5d_prior <- if (enough_5d_history) {
+    px_full$close[[entry_idx - 1]] / px_full$close[[entry_idx - 6]] - 1
+  } else {
+    NA_real_
+  }
+  
+  ret_20d_prior <- if (enough_20d_history) {
+    px_full$close[[entry_idx - 1]] / px_full$close[[entry_idx - 21]] - 1
+  } else {
+    NA_real_
+  }
+  
+  daily_ret <- px_full$close / dplyr::lag(px_full$close) - 1
+  
+  volatility_20d <- if (enough_20d_history) {
+    sd(daily_ret[(entry_idx - 20):(entry_idx - 1)], na.rm = TRUE)
+  } else {
+    NA_real_
+  }
+  
+  prev_close <- if (!is.na(entry_idx) && entry_idx > 1) {
+    px_full$close[[entry_idx - 1]]
+  } else {
+    NA_real_
+  }
+  
+  gap_from_prev_close <- if (entry_at == "open" && !is.na(prev_close) && prev_close > 0) {
+    entry_price / prev_close - 1
+  } else {
+    NA_real_
+  }
+  
+  directional_ret_5d <- if (is_short) {
+    -ret_5d_prior
+  } else {
+    ret_5d_prior
+  }
+  
+  directional_ret_20d <- if (is_short) {
+    -ret_20d_prior
+  } else {
+    ret_20d_prior
+  }
+  
+  directional_dist_sma10 <- if (is_short) {
+    -dist_sma10
+  } else {
+    dist_sma10
+  }
+  
+  # ------------------------------------------------------------------
+  # Strategy exit logic
+  # ------------------------------------------------------------------
+  
   px_scan <- px_full %>%
     filter(date >= (as.Date(tweet_ts_et) - days(lookback)))
   
@@ -623,7 +700,11 @@ simulate_trade <- function(ticker,
         (1 / 3) * ((final_exit_px - entry_price) / entry_price)
     }
   } else {
-    if (is_short) (entry_price - final_exit_px) / entry_price else (final_exit_px - entry_price) / entry_price
+    if (is_short) {
+      (entry_price - final_exit_px) / entry_price
+    } else {
+      (final_exit_px - entry_price) / entry_price
+    }
   }
   
   tibble(
@@ -636,6 +717,21 @@ simulate_trade <- function(ticker,
     entry_sma = entry_sma,
     has_entry_sma = !is.na(entry_sma),
     entry_below_sma10 = entry_below_sma10,
+    
+    enough_sma10_history = enough_sma10_history,
+    enough_5d_history = enough_5d_history,
+    enough_20d_history = enough_20d_history,
+    young_stock_flag = young_stock_flag,
+    sma10_prior = sma10_prior,
+    dist_sma10 = dist_sma10,
+    ret_5d_prior = ret_5d_prior,
+    ret_20d_prior = ret_20d_prior,
+    volatility_20d = volatility_20d,
+    gap_from_prev_close = gap_from_prev_close,
+    directional_ret_5d = directional_ret_5d,
+    directional_ret_20d = directional_ret_20d,
+    directional_dist_sma10 = directional_dist_sma10,
+    
     rows_before_entry = rows_before_entry,
     non_na_closes_before_entry = non_na_closes_before_entry,
     px_start = min(px_full$date, na.rm = TRUE),
@@ -832,17 +928,17 @@ backtest_raw <- if (backtest_exists) {
 # -----------------------------------------------------------------------------
 signals_tbl <- signals_raw %>%
   mutate(
-    created_at       = as.POSIXct(created_at, tz = "UTC"),
-    tweet_ts_et      = with_tz(created_at, "America/New_York"),
-    ticker           = str_to_upper(ticker),
-    side             = str_to_lower(direction),
-    conversation_id  = as.character(conversation_id),
-    conviction       = as.numeric(conviction),
-    buy_zone         = as_logicalish(buy_zone),
-    sentiment_score  = as.numeric(sentiment_score),
-    evidence_score   = as.numeric(evidence_score),
+    created_at        = as.POSIXct(created_at, tz = "UTC"),
+    tweet_ts_et       = with_tz(created_at, "America/New_York"),
+    ticker            = str_to_upper(ticker),
+    side              = str_to_lower(direction),
+    conversation_id   = as.character(conversation_id),
+    conviction        = as.numeric(conviction),
+    buy_zone          = as_logicalish(buy_zone),
+    sentiment_score   = as.numeric(sentiment_score),
+    evidence_score    = as.numeric(evidence_score),
     specificity_score = as.numeric(specificity_score),
-    has_quant_data   = as_logicalish(has_quant_data)
+    has_quant_data    = as_logicalish(has_quant_data)
   ) %>%
   transmute(
     ticker,
@@ -1008,6 +1104,28 @@ qid <- function(x) as.character(DBI::dbQuoteIdentifier(con, x))
 
 target_tbl   <- DBI::Id(schema = "public", table = "twitter_backtest_results")
 target_tbl_q <- as.character(DBI::dbQuoteIdentifier(con, target_tbl))
+
+# -----------------------------------------------------------------------------
+# Ensure new feature columns exist in target table
+# -----------------------------------------------------------------------------
+if (dbExistsTable(con, target_tbl)) {
+  dbExecute(con, "
+    ALTER TABLE public.twitter_backtest_results
+    ADD COLUMN IF NOT EXISTS enough_sma10_history boolean,
+    ADD COLUMN IF NOT EXISTS enough_5d_history boolean,
+    ADD COLUMN IF NOT EXISTS enough_20d_history boolean,
+    ADD COLUMN IF NOT EXISTS young_stock_flag boolean,
+    ADD COLUMN IF NOT EXISTS sma10_prior double precision,
+    ADD COLUMN IF NOT EXISTS dist_sma10 double precision,
+    ADD COLUMN IF NOT EXISTS ret_5d_prior double precision,
+    ADD COLUMN IF NOT EXISTS ret_20d_prior double precision,
+    ADD COLUMN IF NOT EXISTS volatility_20d double precision,
+    ADD COLUMN IF NOT EXISTS gap_from_prev_close double precision,
+    ADD COLUMN IF NOT EXISTS directional_ret_5d double precision,
+    ADD COLUMN IF NOT EXISTS directional_ret_20d double precision,
+    ADD COLUMN IF NOT EXISTS directional_dist_sma10 double precision;
+  ")
+}
 
 if (!dbExistsTable(con, target_tbl)) {
   dbWriteTable(
