@@ -22,25 +22,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Gate pipeline to exact New York times
-        id: gate_pipeline
-        if: ${{ github.event_name == 'schedule' }}
-        run: |
-          NY_TIME=$(TZ=America/New_York date +'%H:%M')
-          echo "New York time is $NY_TIME"
-          if [ "$NY_TIME" = "09:00" ] || [ "$NY_TIME" = "15:30" ]; then
-            echo "run_now=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_now=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: r-lib/actions/setup-r@v2
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_pipeline.outputs.run_now == 'true' }}
         with:
           r-version: '4.3'
 
       - name: Install system deps
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_pipeline.outputs.run_now == 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -48,7 +34,6 @@ jobs:
             libcurl4-openssl-dev libxml2-dev
 
       - uses: r-lib/actions/setup-r-dependencies@v2
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_pipeline.outputs.run_now == 'true' }}
         with:
           packages: |
             any::DBI
@@ -65,18 +50,18 @@ jobs:
             any::tidyquant
 
       - name: Debug env presence
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_pipeline.outputs.run_now == 'true' }}
         env:
           SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
           SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
           X_BEARER: ${{ secrets.X_BEARER }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           echo "SUPABASE_POOLER_HOST set? $([ -n "$SUPABASE_POOLER_HOST" ] && echo yes || echo no)"
           echo "SUPABASE_USER set? $([ -n "$SUPABASE_USER" ] && echo yes || echo no)"
           echo "X_BEARER set? $([ -n "$X_BEARER" ] && echo yes || echo no)"
+          echo "OPENAI_API_KEY set? $([ -n "$OPENAI_API_KEY" ] && echo yes || echo no)"
 
-      - name: 1) Scrape + upsert tweets (twitter_ingest.R)
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_pipeline.outputs.run_now == 'true' }}
+      - name: 1) Scrape + upsert tweets
         env:
           X_BEARER: ${{ secrets.X_BEARER }}
           TW_HANDLES: ${{ vars.TW_HANDLES }}
@@ -89,8 +74,7 @@ jobs:
         run: |
           Rscript twitter_ingest.R
 
-      - name: 2) Generate + upsert signals (generate_tweet_signals.R)
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_pipeline.outputs.run_now == 'true' }}
+      - name: 2) Generate + upsert signals
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LOCAL_TZ: America/New_York
@@ -113,25 +97,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Gate refresh to exact New York midnight
-        id: gate_refresh
-        if: ${{ github.event_name == 'schedule' }}
-        run: |
-          NY_TIME=$(TZ=America/New_York date +'%H:%M')
-          echo "New York time is $NY_TIME"
-          if [ "$NY_TIME" = "00:00" ]; then
-            echo "run_now=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_now=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: r-lib/actions/setup-r@v2
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_refresh.outputs.run_now == 'true' }}
         with:
           r-version: '4.3'
 
       - name: Install system deps
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_refresh.outputs.run_now == 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -139,7 +109,6 @@ jobs:
             libcurl4-openssl-dev libxml2-dev
 
       - uses: r-lib/actions/setup-r-dependencies@v2
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_refresh.outputs.run_now == 'true' }}
         with:
           packages: |
             any::DBI
@@ -156,16 +125,16 @@ jobs:
             any::TTR
 
       - name: Debug env presence
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_refresh.outputs.run_now == 'true' }}
         env:
           SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
           SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
+          SUPABASE_PWD: ${{ secrets.SUPABASE_PWD }}
         run: |
           echo "SUPABASE_POOLER_HOST set? $([ -n "$SUPABASE_POOLER_HOST" ] && echo yes || echo no)"
           echo "SUPABASE_USER set? $([ -n "$SUPABASE_USER" ] && echo yes || echo no)"
+          echo "SUPABASE_PWD set? $([ -n "$SUPABASE_PWD" ] && echo yes || echo no)"
 
       - name: 3) Refresh incomplete + new backtest rows
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.gate_refresh.outputs.run_now == 'true' }}
         env:
           LOCAL_TZ: America/New_York
           SUPABASE_PORT: ${{ secrets.SUPABASE_PORT }}
