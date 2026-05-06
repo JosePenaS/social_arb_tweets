@@ -2,13 +2,13 @@ name: Scrape Tweets + Generate Signals + Refresh Backtest (Supabase)
 
 on:
   schedule:
-    # Intraday triggers, shifted away from busy minutes
+    # Intraday triggers, shifted away from busy GitHub minutes
     - cron: '7 13 * * 1-5'
     - cron: '7 14 * * 1-5'
     - cron: '37 19 * * 1-5'
     - cron: '37 20 * * 1-5'
 
-    # Midnight-ish New York, shifted away from top of hour
+    # Midnight-ish New York, covering both EST and EDT, shifted away from top of hour
     - cron: '7 4 * * *'
     - cron: '7 5 * * *'
 
@@ -16,7 +16,7 @@ on:
 
 jobs:
   pipeline:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 14 * * 1-5' || github.event.schedule == '30 20 * * 1-5' || github.event.schedule == '0 13 * * 1-5' || github.event.schedule == '30 19 * * 1-5' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '7 14 * * 1-5' || github.event.schedule == '37 20 * * 1-5' || github.event.schedule == '7 13 * * 1-5' || github.event.schedule == '37 19 * * 1-5' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -91,7 +91,7 @@ jobs:
           Rscript generate_tweet_signals.R
 
   refresh_backtest:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 5 * * *' || github.event.schedule == '0 4 * * *' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '7 5 * * *' || github.event.schedule == '7 4 * * *' }}
     runs-on: ubuntu-latest
 
     steps:
