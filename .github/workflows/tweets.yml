@@ -2,15 +2,15 @@ name: Scrape Tweets + Generate Signals + Refresh Backtest (Supabase)
 
 on:
   schedule:
-    # Intraday triggers to cover both EST and EDT
-    - cron: '0 13 * * 1-5'
-    - cron: '0 14 * * 1-5'
-    - cron: '30 19 * * 1-5'
-    - cron: '30 20 * * 1-5'
+    # Intraday triggers, shifted away from busy minutes
+    - cron: '7 13 * * 1-5'
+    - cron: '7 14 * * 1-5'
+    - cron: '37 19 * * 1-5'
+    - cron: '37 20 * * 1-5'
 
-    # Midnight New York, covering both EST and EDT
-    - cron: '0 4 * * *'
-    - cron: '0 5 * * *'
+    # Midnight-ish New York, shifted away from top of hour
+    - cron: '7 4 * * *'
+    - cron: '7 5 * * *'
 
   workflow_dispatch:
 
