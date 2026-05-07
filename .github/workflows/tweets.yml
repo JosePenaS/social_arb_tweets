@@ -2,13 +2,19 @@ name: Scrape Tweets + Generate Signals + Refresh Backtest (Supabase)
 
 on:
   schedule:
-    # Intraday triggers, shifted away from busy GitHub minutes
+    # Weekday intraday triggers, shifted away from busy GitHub minutes
     - cron: '7 13 * * 1-5'
     - cron: '7 14 * * 1-5'
     - cron: '37 19 * * 1-5'
     - cron: '37 20 * * 1-5'
 
+    # Weekend tweet scrape, Saturday/Sunday only
+    # Around NY daytime/afternoon depending on EST/EDT
+    - cron: '7 16 * * 6,0'
+    - cron: '7 22 * * 6,0'
+
     # Midnight-ish New York, covering both EST and EDT, shifted away from top of hour
+    # This is for refreshing the backtest, not scraping tweets
     - cron: '7 4 * * *'
     - cron: '7 5 * * *'
 
@@ -16,7 +22,7 @@ on:
 
 jobs:
   pipeline:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '7 14 * * 1-5' || github.event.schedule == '37 20 * * 1-5' || github.event.schedule == '7 13 * * 1-5' || github.event.schedule == '37 19 * * 1-5' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '7 14 * * 1-5' || github.event.schedule == '37 20 * * 1-5' || github.event.schedule == '7 13 * * 1-5' || github.event.schedule == '37 19 * * 1-5' || github.event.schedule == '7 16 * * 6,0' || github.event.schedule == '7 22 * * 6,0' }}
     runs-on: ubuntu-latest
 
     steps:
