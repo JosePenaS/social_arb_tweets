@@ -9,16 +9,18 @@ on:
     - cron: '37 20 * * 1-5'
 
     # Weekend tweet scrape, Saturday/Sunday only
-    # Around NY daytime/afternoon depending on EST/EDT
     - cron: '7 16 * * 6,0'
     - cron: '7 22 * * 6,0'
 
-    # Midnight-ish New York, covering both EST and EDT, shifted away from top of hour
-    # This is for refreshing the backtest, not scraping tweets
+    # Midnight-ish New York refresh only
     - cron: '7 4 * * *'
     - cron: '7 5 * * *'
 
   workflow_dispatch:
+
+concurrency:
+  group: social-arb-pipeline-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   pipeline:
@@ -37,7 +39,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential libpq-dev libssl-dev \
-            libcurl4-openssl-dev libxml2-dev
+            libcurl4-openssl-dev libxml2-dev curl
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
@@ -54,16 +56,20 @@ jobs:
             any::jsonlite
             any::httr2
             any::tidyquant
+            any::zoo
+            any::TTR
 
       - name: Debug env presence
         env:
           SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
           SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
+          SUPABASE_PWD: ${{ secrets.SUPABASE_PWD }}
           X_BEARER: ${{ secrets.X_BEARER }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           echo "SUPABASE_POOLER_HOST set? $([ -n "$SUPABASE_POOLER_HOST" ] && echo yes || echo no)"
           echo "SUPABASE_USER set? $([ -n "$SUPABASE_USER" ] && echo yes || echo no)"
+          echo "SUPABASE_PWD set? $([ -n "$SUPABASE_PWD" ] && echo yes || echo no)"
           echo "X_BEARER set? $([ -n "$X_BEARER" ] && echo yes || echo no)"
           echo "OPENAI_API_KEY set? $([ -n "$OPENAI_API_KEY" ] && echo yes || echo no)"
 
@@ -96,8 +102,19 @@ jobs:
         run: |
           Rscript generate_tweet_signals.R
 
+      - name: 3) Refresh incomplete + new backtest rows
+        env:
+          LOCAL_TZ: America/New_York
+          SUPABASE_PORT: ${{ secrets.SUPABASE_PORT }}
+          SUPABASE_DB: ${{ secrets.SUPABASE_DB }}
+          SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
+          SUPABASE_PWD: ${{ secrets.SUPABASE_PWD }}
+          SUPABASE_POOLER_HOST: ${{ secrets.SUPABASE_POOLER_HOST }}
+        run: |
+          Rscript refresh_backtest_results.R
+
   refresh_backtest:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '7 5 * * *' || github.event.schedule == '7 4 * * *' }}
+    if: ${{ github.event_name == 'schedule' && (github.event.schedule == '7 5 * * *' || github.event.schedule == '7 4 * * *') }}
     runs-on: ubuntu-latest
 
     steps:
@@ -112,7 +129,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential libpq-dev libssl-dev \
-            libcurl4-openssl-dev libxml2-dev
+            libcurl4-openssl-dev libxml2-dev curl
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
@@ -140,7 +157,7 @@ jobs:
           echo "SUPABASE_USER set? $([ -n "$SUPABASE_USER" ] && echo yes || echo no)"
           echo "SUPABASE_PWD set? $([ -n "$SUPABASE_PWD" ] && echo yes || echo no)"
 
-      - name: 3) Refresh incomplete + new backtest rows
+      - name: Refresh incomplete + new backtest rows only
         env:
           LOCAL_TZ: America/New_York
           SUPABASE_PORT: ${{ secrets.SUPABASE_PORT }}
