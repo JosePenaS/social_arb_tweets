@@ -105,6 +105,7 @@ jobs:
       - name: 3) Refresh incomplete + new backtest rows
         env:
           LOCAL_TZ: America/New_York
+          DEBUG_YAHOO: "true"
           SUPABASE_PORT: ${{ secrets.SUPABASE_PORT }}
           SUPABASE_DB: ${{ secrets.SUPABASE_DB }}
           SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
@@ -160,6 +161,7 @@ jobs:
       - name: Refresh incomplete + new backtest rows only
         env:
           LOCAL_TZ: America/New_York
+          DEBUG_YAHOO: "true"
           SUPABASE_PORT: ${{ secrets.SUPABASE_PORT }}
           SUPABASE_DB: ${{ secrets.SUPABASE_DB }}
           SUPABASE_USER: ${{ secrets.SUPABASE_USER }}
