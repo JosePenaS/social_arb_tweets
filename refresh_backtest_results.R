@@ -52,6 +52,8 @@ suppressPackageStartupMessages({
   library(TTR)
 })
 
+message("RUNNING FILE: refresh_backtest_results.R | PATCHED SAFE YAHOO VERSION | 2026-05-12")
+
 # -----------------------------------------------------------------------------
 # 0) Controls
 # -----------------------------------------------------------------------------
