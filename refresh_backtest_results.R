@@ -2,23 +2,15 @@
 
 # =============================================================================
 # Social Arbitrage Backtest - 10% take-profit / 5% stop strategy
-# Strategy label: tp10_sl5
+# File expected by YAML: refresh_backtest_results.R
 #
 # This script:
 #   1) Pulls signals from public.twitter_trade_signals
 #   2) Backtests only new signals + incomplete/open rows
-#   3) Uses target_pct = 0.10 and stop_pct = 0.05
+#   3) Uses target_pct = 0.10 and stop_pct = 0.05 by default
 #   4) Preserves horizon from the signal table
-#   5) Applies the fixed lockup scan using the first real trading day >= lockup date
+#   5) Applies lockup scan using the first real trading day >= lockup date
 #   6) Uploads/upserts into public.twitter_backtest_results_10_perc_strategy
-#
-# IMPORTANT:
-#   Your GitHub YAML must call the actual file name.
-#   If this file is named backtest_tp10_sl5_incremental.R, your YAML should use:
-#     Rscript backtest_tp10_sl5_incremental.R
-#   If your YAML says:
-#     Rscript refresh_backtest_results.R
-#   then this file must be named refresh_backtest_results.R.
 #
 # Required GitHub secrets/env vars:
 #   SUPABASE_POOLER_HOST
@@ -28,7 +20,8 @@
 #   SUPABASE_PWD
 #
 # Optional env vars:
-#   BACKTEST_AS_OF_DATE       default Sys.Date()
+#   BACKTEST_AS_OF_DATE       optional manual override, YYYY-MM-DD
+#   LOCAL_TZ                  default America/New_York; used to avoid GitHub UTC date drift
 #   CACHE_DIR                 default cache_px_tp10_sl5
 #   BACKTEST_TARGET_TABLE     default twitter_backtest_results_10_perc_strategy
 #   BACKTEST_STRATEGY_LABEL   default tp10_sl5
@@ -52,6 +45,8 @@ suppressPackageStartupMessages({
   library(TTR)
 })
 
+message("RUNNING FILE: refresh_backtest_results.R | SAFE YAHOO + SMOKE TEST + LOCAL AS_OF_DATE VERSION | 2026-05-13")
+
 # -----------------------------------------------------------------------------
 # 0) Controls
 # -----------------------------------------------------------------------------
@@ -67,8 +62,18 @@ STOP_PCT   <- as.numeric(Sys.getenv("STOP_PCT", "0.05"))
 
 CACHE_DIR <- Sys.getenv("CACHE_DIR", "cache_px_tp10_sl5")
 
-AS_OF_DATE <- Sys.getenv("BACKTEST_AS_OF_DATE", "")
-AS_OF_DATE <- if (nzchar(AS_OF_DATE)) as.Date(AS_OF_DATE) else Sys.Date()
+LOCAL_TZ <- Sys.getenv("LOCAL_TZ", "America/New_York")
+
+AS_OF_DATE_ENV <- Sys.getenv("BACKTEST_AS_OF_DATE", "")
+
+AS_OF_DATE <- if (nzchar(AS_OF_DATE_ENV)) {
+  as.Date(AS_OF_DATE_ENV)
+} else {
+  # Important for GitHub Actions:
+  # Sys.Date() uses the runner/system date, which may already be tomorrow in UTC.
+  # Using New York local date minus 1 avoids requesting future Yahoo daily data.
+  as.Date(lubridate::with_tz(Sys.time(), LOCAL_TZ)) - lubridate::days(1)
+}
 
 DEBUG_YAHOO <- identical(tolower(Sys.getenv("DEBUG_YAHOO", "false")), "true")
 
@@ -76,8 +81,10 @@ message("Strategy label: ", STRATEGY_LABEL)
 message("Target table: public.", TARGET_TABLE_NAME)
 message("Target pct: ", TARGET_PCT)
 message("Stop pct: ", STOP_PCT)
+message("Local TZ: ", LOCAL_TZ)
 message("As-of date: ", AS_OF_DATE)
 message("Cache dir: ", CACHE_DIR)
+message("Debug Yahoo: ", DEBUG_YAHOO)
 
 # -----------------------------------------------------------------------------
 # 1) Helpers
@@ -112,7 +119,7 @@ as_logicalish <- function(x) {
 normalize_symbol_for_yahoo <- function(sym) {
   sym <- toupper(trimws(as.character(sym)))
 
-  # Keep Yahoo exchange suffixes like ATZ.TO, SHOP.TO, BHP.AX, VOD.L, etc.
+  # Keep common Yahoo exchange suffixes like ATZ.TO, SHOP.TO, BHP.AX, VOD.L, etc.
   if (grepl("\\.(TO|V|L|AX|SA|MX|PA|AS|DE|F|HK|SS|SZ|T)$", sym)) {
     return(sym)
   }
@@ -250,6 +257,7 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
 
     if (debug) {
       cat("Attempt:", k, "\n")
+      cat("Yahoo symbol:", sym, "\n")
       cat("URL:", url, "\n")
       cat("Status:", status, "\n")
       cat("File exists:", file.exists(dest_json), "\n")
@@ -268,6 +276,11 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
         !grepl("Too Many Requests", txt, fixed = TRUE)
       ) {
         return(TRUE)
+      }
+
+      if (debug) {
+        message("Yahoo response did not pass validation. First 800 chars:")
+        message(substr(txt, 1, 800))
       }
     }
 
@@ -366,7 +379,31 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
     debug = debug
   )
 
-  if (!ok) return(empty_px_tbl())
+  if (!ok) {
+    if (debug && file.exists(tmp_json)) {
+      txt_dbg <- tryCatch(
+        paste(readLines(tmp_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n"),
+        error = function(e) ""
+      )
+
+      message("Yahoo fetch returned ok=FALSE for ", sym, ". First 800 chars:")
+      message(substr(txt_dbg, 1, 800))
+    } else {
+      message("Yahoo fetch returned ok=FALSE for ", sym, " and no response file was available.")
+    }
+
+    return(empty_px_tbl())
+  }
+
+  if (debug && file.exists(tmp_json)) {
+    txt_dbg <- tryCatch(
+      paste(readLines(tmp_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n"),
+      error = function(e) ""
+    )
+
+    message("Yahoo raw response first 800 chars for ", sym, ":")
+    message(substr(txt_dbg, 1, 800))
+  }
 
   px <- read_yahoo_chart_json(tmp_json)
 
@@ -381,6 +418,7 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
 }
 
 get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_px_via_syscurl_yahoo) {
+
   if (is.na(from) || is.na(to) || !nzchar(sym)) return(empty_px_tbl())
 
   dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
@@ -442,6 +480,25 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
     mutate(date = as.Date(date)) %>%
     filter(date >= need_from, date <= need_to) %>%
     arrange(date)
+}
+
+# -----------------------------------------------------------------------------
+# Yahoo smoke test
+# -----------------------------------------------------------------------------
+
+message("Running Yahoo smoke test with AMZN...")
+
+smoke_px <- get_px_via_syscurl_yahoo(
+  sym = "AMZN",
+  from = Sys.Date() - 20,
+  to = Sys.Date(),
+  debug = DEBUG_YAHOO
+)
+
+message("Yahoo smoke test AMZN rows: ", nrow(smoke_px))
+
+if (nrow(smoke_px) == 0) {
+  stop("Yahoo smoke test failed for AMZN. Stopping before processing all trades.")
 }
 
 # -----------------------------------------------------------------------------
@@ -782,6 +839,7 @@ simulate_trade <- function(ticker,
             completed     <- FALSE
             trade_status  <- "open_runner"
             completion_reason <- "runner_no_trail_exit_yet"
+  
             exit_reason   <- "open_runner"
             final_exit_d  <- mtm_date
             final_exit_px <- mtm_price
@@ -1201,8 +1259,7 @@ signals_tbl <- signals_raw %>%
     evidence_snippet,
     signal_key
   ) %>%
-  filter(
-    !is.na(tweet_ts_et),
+  filter(    !is.na(tweet_ts_et),
     !is.na(ticker),
     ticker != "",
     side %in% c("long", "short")
@@ -1421,12 +1478,12 @@ existing_dupes <- DBI::dbGetQuery(
     SELECT COUNT(*) AS n_duplicate_trade_ids
     FROM (
       SELECT trade_id
-      FROM public.%s
+      FROM %s
       GROUP BY trade_id
       HAVING COUNT(*) > 1
     ) d;
     ",
-    TARGET_TABLE_NAME
+    target_tbl_q
   )
 )
 
@@ -1533,8 +1590,8 @@ DBI::dbGetQuery(
   con,
   sprintf(
     "SELECT COUNT(*) AS n_rows
-     FROM public.%s;",
-    TARGET_TABLE_NAME
+     FROM %s;",
+    target_tbl_q
   )
 ) %>% print()
 
@@ -1545,12 +1602,12 @@ DBI::dbGetQuery(
     SELECT COUNT(*) AS n_duplicate_trade_ids
     FROM (
       SELECT trade_id
-      FROM public.%s
+      FROM %s
       GROUP BY trade_id
       HAVING COUNT(*) > 1
     ) d;
     ",
-    TARGET_TABLE_NAME
+    target_tbl_q
   )
 ) %>% print()
 
@@ -1562,9 +1619,9 @@ DBI::dbGetQuery(
       MIN(entry_date) AS first_entry_date,
       MAX(entry_date) AS last_entry_date,
       COUNT(*) AS n_rows
-    FROM public.%s;
+    FROM %s;
     ",
-    TARGET_TABLE_NAME
+    target_tbl_q
   )
 ) %>% print()
 
@@ -1577,11 +1634,11 @@ DBI::dbGetQuery(
       target_pct,
       stop_pct,
       COUNT(*) AS n_rows
-    FROM public.%s
+    FROM %s
     GROUP BY strategy_label, target_pct, stop_pct
     ORDER BY n_rows DESC;
     ",
-    TARGET_TABLE_NAME
+    target_tbl_q
   )
 ) %>% print()
 
@@ -1592,10 +1649,18 @@ DBI::dbGetQuery(
     SELECT
       horizon,
       COUNT(*) AS n_rows
-    FROM public.%s
+    FROM %s
     GROUP BY horizon
     ORDER BY n_rows DESC;
     ",
-    TARGET_TABLE_NAME
+    target_tbl_q
   )
 ) %>% print()
+
+
+
+
+
+
+
+    
