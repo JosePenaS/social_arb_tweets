@@ -221,12 +221,12 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
   period1 <- date_to_unix(from, end_of_day = FALSE)
   period2 <- date_to_unix(to, end_of_day = TRUE)
 
-  url <- paste0(
-    "https://query1.finance.yahoo.com/v8/finance/chart/", sym,
-    "?period1=", period1,
-    "&period2=", period2,
-    "&interval=1d&includeAdjustedClose=true"
-  )
+url <- paste0(
+  "https://query2.finance.yahoo.com/v8/finance/chart/", sym,
+  "?period1=", period1,
+  "&period2=", period2,
+  "&interval=1d&includeAdjustedClose=true"
+)
 
   curl_bin <- Sys.which("curl")
   if (!nzchar(curl_bin)) stop("curl not found on system")
