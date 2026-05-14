@@ -131,7 +131,7 @@ normalize_symbol_for_yahoo <- function(sym) {
 date_to_unix <- function(x, end_of_day = FALSE) {
   x <- as.POSIXct(as.Date(x), tz = "UTC")
   if (end_of_day) x <- x + 86399
-  as.integer(x)
+  floor(as.numeric(x))
 }
 
 connect_supabase <- function() {
