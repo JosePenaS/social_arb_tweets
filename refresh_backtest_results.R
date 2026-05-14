@@ -488,10 +488,15 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
 
 message("Running Yahoo smoke test with AMZN...")
 
+smoke_from <- AS_OF_DATE - lubridate::days(20)
+smoke_to   <- AS_OF_DATE
+
+message("Yahoo smoke test window: ", smoke_from, " to ", smoke_to)
+
 smoke_px <- get_px_via_syscurl_yahoo(
   sym = "AMZN",
-  from = Sys.Date() - 20,
-  to = Sys.Date(),
+  from = smoke_from,
+  to = smoke_to,
   debug = DEBUG_YAHOO
 )
 
