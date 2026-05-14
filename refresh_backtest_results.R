@@ -417,6 +417,93 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
     arrange(date)
 }
 
+get_px_via_stooq <- function(sym, from, to, debug = DEBUG_YAHOO) {
+  sym0 <- toupper(trimws(as.character(sym)))
+
+  # Stooq fallback mainly supports US tickers with .us suffix.
+  # Skip foreign/exchange suffix symbols like BRBY.L, ATZ.TO, etc.
+  if (grepl("\\.", sym0)) {
+    if (debug) message("Skipping Stooq for non-US/suffixed symbol: ", sym0)
+    return(empty_px_tbl())
+  }
+
+  stooq_sym <- paste0(tolower(sym0), ".us")
+
+  url <- paste0(
+    "https://stooq.com/q/d/l/?s=", stooq_sym,
+    "&d1=", format(as.Date(from), "%Y%m%d"),
+    "&d2=", format(as.Date(to), "%Y%m%d"),
+    "&i=d"
+  )
+
+  tmp_csv <- tempfile(fileext = ".csv")
+  on.exit({
+    if (file.exists(tmp_csv)) unlink(tmp_csv)
+  }, add = TRUE)
+
+  curl_bin <- Sys.which("curl")
+  if (!nzchar(curl_bin)) stop("curl not found on system")
+
+  args <- c(
+    "-L",
+    "--silent",
+    "--show-error",
+    "--user-agent", "Mozilla/5.0",
+    "--output", tmp_csv,
+    url
+  )
+
+  out <- tryCatch(
+    system2(curl_bin, args = args, stdout = TRUE, stderr = TRUE),
+    error = function(e) e
+  )
+
+  status <- if (inherits(out, "error")) 1L else attr(out, "status")
+  if (is.null(status)) status <- 0L
+
+  if (debug) {
+    message("Stooq URL for ", sym0, ": ", url)
+    message("Stooq status: ", status)
+    if (file.exists(tmp_csv)) message("Stooq file size: ", file.info(tmp_csv)$size)
+  }
+
+  if (
+    !identical(as.integer(status), 0L) ||
+    !file.exists(tmp_csv) ||
+    file.info(tmp_csv)$size == 0
+  ) {
+    return(empty_px_tbl())
+  }
+
+  px <- tryCatch(
+    read.csv(tmp_csv, stringsAsFactors = FALSE),
+    error = function(e) data.frame()
+  )
+
+  if (!is.data.frame(px) || nrow(px) == 0 || !"Date" %in% names(px)) {
+    if (debug && file.exists(tmp_csv)) {
+      txt_dbg <- paste(readLines(tmp_csv, warn = FALSE), collapse = "\n")
+      message("Bad Stooq response first 500 chars:")
+      message(substr(txt_dbg, 1, 500))
+    }
+
+    return(empty_px_tbl())
+  }
+
+  px %>%
+    as_tibble() %>%
+    transmute(
+      date = as.Date(Date),
+      open = as.numeric(Open),
+      high = as.numeric(High),
+      low = as.numeric(Low),
+      close = as.numeric(Close),
+      volume = as.numeric(Volume)
+    ) %>%
+    filter(!is.na(date), date >= as.Date(from), date <= as.Date(to)) %>%
+    arrange(date)
+}                         
+
 get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_px_via_syscurl_yahoo) {
 
   if (is.na(from) || is.na(to) || !nzchar(sym)) return(empty_px_tbl())
@@ -452,27 +539,45 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
       max(cached$date, na.rm = TRUE) < need_to
   )
 
-  if (need_fetch) {
+ if (need_fetch) {
+  fresh <- tryCatch(
+    fetch_fn(sym = sym, from = need_from, to = need_to),
+    error = function(e) {
+      message(sprintf("Yahoo fetch failed for %s [%s to %s]: %s", sym, need_from, need_to, e$message))
+      empty_px_tbl()
+    }
+  )
+
+  if (!is.data.frame(fresh) || nrow(fresh) == 0 || !"date" %in% names(fresh)) {
+    message(sprintf(
+      "No usable Yahoo price data for %s [%s to %s]. Trying Stooq...",
+      sym, need_from, need_to
+    ))
+
     fresh <- tryCatch(
-      fetch_fn(sym = sym, from = need_from, to = need_to),
+      get_px_via_stooq(sym = sym, from = need_from, to = need_to, debug = DEBUG_YAHOO),
       error = function(e) {
-        message(sprintf("Fetch failed for %s [%s to %s]: %s", sym, need_from, need_to, e$message))
+        message(sprintf("Stooq fetch failed for %s [%s to %s]: %s", sym, need_from, need_to, e$message))
         empty_px_tbl()
       }
     )
-
-    if (is.data.frame(fresh) && nrow(fresh) > 0 && "date" %in% names(fresh)) {
-      cached <- bind_rows(cached, fresh) %>%
-        mutate(date = as.Date(date)) %>%
-        filter(!is.na(date)) %>%
-        distinct(date, .keep_all = TRUE) %>%
-        arrange(date)
-
-      saveRDS(cached, fname)
-    } else {
-      message(sprintf("No usable Yahoo price data for %s [%s to %s]", sym, need_from, need_to))
-    }
   }
+
+  if (is.data.frame(fresh) && nrow(fresh) > 0 && "date" %in% names(fresh)) {
+    cached <- bind_rows(cached, fresh) %>%
+      mutate(date = as.Date(date)) %>%
+      filter(!is.na(date)) %>%
+      distinct(date, .keep_all = TRUE) %>%
+      arrange(date)
+
+    saveRDS(cached, fname)
+  } else {
+    message(sprintf(
+      "No usable Yahoo or Stooq price data for %s [%s to %s]",
+      sym, need_from, need_to
+    ))
+  }
+}
 
   if (nrow(cached) == 0 || !"date" %in% names(cached)) return(empty_px_tbl())
 
@@ -486,12 +591,12 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
 # Yahoo smoke test
 # -----------------------------------------------------------------------------
 
-message("Running Yahoo smoke test with AMZN...")
+message("Running price smoke test with AMZN...")
 
-smoke_from <- as.Date("2024-04-22")
-smoke_to   <- as.Date("2024-05-12")
+smoke_from <- AS_OF_DATE - lubridate::days(20)
+smoke_to   <- AS_OF_DATE
 
-message("Yahoo smoke test window: ", smoke_from, " to ", smoke_to)
+message("Price smoke test window: ", smoke_from, " to ", smoke_to)
 
 smoke_px <- get_px_via_syscurl_yahoo(
   sym = "AMZN",
@@ -503,7 +608,20 @@ smoke_px <- get_px_via_syscurl_yahoo(
 message("Yahoo smoke test AMZN rows: ", nrow(smoke_px))
 
 if (nrow(smoke_px) == 0) {
-  stop("Yahoo smoke test failed for AMZN. Stopping before processing all trades.")
+  message("Yahoo smoke test failed for AMZN. Trying Stooq...")
+
+  smoke_px <- get_px_via_stooq(
+    sym = "AMZN",
+    from = smoke_from,
+    to = smoke_to,
+    debug = DEBUG_YAHOO
+  )
+
+  message("Stooq smoke test AMZN rows: ", nrow(smoke_px))
+}
+
+if (nrow(smoke_px) == 0) {
+  stop("Both Yahoo and Stooq smoke tests failed for AMZN. Stopping before processing all trades.")
 }
 
 # -----------------------------------------------------------------------------
