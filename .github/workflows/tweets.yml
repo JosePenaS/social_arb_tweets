@@ -102,6 +102,47 @@ jobs:
         run: |
           Rscript generate_tweet_signals.R
 
+      - name: Yahoo crumb/session test
+        run: |
+          set -e
+
+          COOKIE_JAR="$(mktemp)"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+          echo "Step 1: hit fc.yahoo.com to establish cookie"
+          curl -L --http1.1 --ipv4 \
+            -A "$UA" \
+            -c "$COOKIE_JAR" \
+            -b "$COOKIE_JAR" \
+            "https://fc.yahoo.com" \
+            -o /tmp/fc.html || true
+
+          echo "Step 2: get crumb"
+          CRUMB=$(curl -L --http1.1 --ipv4 \
+            -A "$UA" \
+            -c "$COOKIE_JAR" \
+            -b "$COOKIE_JAR" \
+            "https://query2.finance.yahoo.com/v1/test/getcrumb" || true)
+
+          echo "Crumb first chars:"
+          echo "$CRUMB" | head -c 80
+          echo ""
+
+          echo "Step 3: request chart with crumb"
+          URL="https://query2.finance.yahoo.com/v8/finance/chart/AMZN?period1=1776816000&period2=1778630399&interval=1d&includeAdjustedClose=true&crumb=${CRUMB}"
+
+          echo "URL without crumb printed:"
+          echo "https://query2.finance.yahoo.com/v8/finance/chart/AMZN?period1=1776816000&period2=1778630399&interval=1d&includeAdjustedClose=true&crumb=REDACTED"
+
+          curl -L --http1.1 --ipv4 \
+            -A "$UA" \
+            -H "Accept: application/json" \
+            -c "$COOKIE_JAR" \
+            -b "$COOKIE_JAR" \
+            "$URL" | head -c 1000
+
+          echo ""
+
       - name: 3) Refresh incomplete + new backtest rows
         env:
           LOCAL_TZ: America/New_York
@@ -162,6 +203,47 @@ jobs:
           echo "SUPABASE_POOLER_HOST set? $([ -n "$SUPABASE_POOLER_HOST" ] && echo yes || echo no)"
           echo "SUPABASE_USER set? $([ -n "$SUPABASE_USER" ] && echo yes || echo no)"
           echo "SUPABASE_PWD set? $([ -n "$SUPABASE_PWD" ] && echo yes || echo no)"
+
+      - name: Yahoo crumb/session test
+        run: |
+          set -e
+
+          COOKIE_JAR="$(mktemp)"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+          echo "Step 1: hit fc.yahoo.com to establish cookie"
+          curl -L --http1.1 --ipv4 \
+            -A "$UA" \
+            -c "$COOKIE_JAR" \
+            -b "$COOKIE_JAR" \
+            "https://fc.yahoo.com" \
+            -o /tmp/fc.html || true
+
+          echo "Step 2: get crumb"
+          CRUMB=$(curl -L --http1.1 --ipv4 \
+            -A "$UA" \
+            -c "$COOKIE_JAR" \
+            -b "$COOKIE_JAR" \
+            "https://query2.finance.yahoo.com/v1/test/getcrumb" || true)
+
+          echo "Crumb first chars:"
+          echo "$CRUMB" | head -c 80
+          echo ""
+
+          echo "Step 3: request chart with crumb"
+          URL="https://query2.finance.yahoo.com/v8/finance/chart/AMZN?period1=1776816000&period2=1778630399&interval=1d&includeAdjustedClose=true&crumb=${CRUMB}"
+
+          echo "URL without crumb printed:"
+          echo "https://query2.finance.yahoo.com/v8/finance/chart/AMZN?period1=1776816000&period2=1778630399&interval=1d&includeAdjustedClose=true&crumb=REDACTED"
+
+          curl -L --http1.1 --ipv4 \
+            -A "$UA" \
+            -H "Accept: application/json" \
+            -c "$COOKIE_JAR" \
+            -b "$COOKIE_JAR" \
+            "$URL" | head -c 1000
+
+          echo ""
 
       - name: Refresh incomplete + new backtest rows only
         env:
