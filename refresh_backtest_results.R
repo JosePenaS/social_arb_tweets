@@ -45,7 +45,7 @@ suppressPackageStartupMessages({
   library(TTR)
 })
 
-message("RUNNING FILE: refresh_backtest_results.R | SAFE YAHOO + SMOKE TEST + LOCAL AS_OF_DATE VERSION | 2026-05-13")
+message("RUNNING FILE: refresh_backtest_results.R | YAHOO COOKIE/CRUMB + SMOKE TEST + LOCAL AS_OF_DATE VERSION | 2026-05-15")
 
 # -----------------------------------------------------------------------------
 # 0) Controls
@@ -120,12 +120,12 @@ normalize_symbol_for_yahoo <- function(sym) {
   sym <- toupper(trimws(as.character(sym)))
 
   # Keep common Yahoo exchange suffixes like ATZ.TO, SHOP.TO, BHP.AX, VOD.L, etc.
-  if (grepl("\\.(TO|V|L|AX|SA|MX|PA|AS|DE|F|HK|SS|SZ|T)$", sym)) {
+  if (grepl("\.(TO|V|L|AX|SA|MX|PA|AS|DE|F|HK|SS|SZ|T)$", sym)) {
     return(sym)
   }
 
   # Convert US share-class tickers like BRK.B / BF.B to BRK-B / BF-B.
-  gsub("\\.", "-", sym)
+  gsub("\.", "-", sym)
 }
 
 date_to_unix <- function(x, end_of_day = FALSE) {
@@ -213,6 +213,114 @@ add_missing_columns <- function(con, table_schema, table_name, df) {
 # 2) Yahoo fetch + cache
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# Yahoo cookie / crumb session helpers
+# -----------------------------------------------------------------------------
+
+YAHOO_COOKIE_JAR <- tempfile(fileext = ".cookies")
+YAHOO_CRUMB <- NA_character_
+
+get_yahoo_crumb <- function(debug = DEBUG_YAHOO) {
+  if (!is.na(YAHOO_CRUMB) && nzchar(YAHOO_CRUMB) && file.exists(YAHOO_COOKIE_JAR)) {
+    return(YAHOO_CRUMB)
+  }
+
+  curl_bin <- Sys.which("curl")
+  if (!nzchar(curl_bin)) stop("curl not found on system")
+
+  ua <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+  tmp_fc <- tempfile(fileext = ".html")
+  on.exit({
+    if (file.exists(tmp_fc)) unlink(tmp_fc)
+  }, add = TRUE)
+
+  # Step 1: establish Yahoo cookie
+  args_fc <- c(
+    "-L",
+    "--http1.1",
+    "--ipv4",
+    "-A", ua,
+    "-c", YAHOO_COOKIE_JAR,
+    "-b", YAHOO_COOKIE_JAR,
+    "--output", tmp_fc,
+    "https://fc.yahoo.com"
+  )
+
+  out_fc <- tryCatch(
+    system2(curl_bin, args = args_fc, stdout = TRUE, stderr = TRUE),
+    error = function(e) e
+  )
+
+  status_fc <- if (inherits(out_fc, "error")) 1L else attr(out_fc, "status")
+  if (is.null(status_fc)) status_fc <- 0L
+
+  if (debug) {
+    message("Yahoo cookie setup status: ", status_fc)
+    message("Yahoo cookie jar exists: ", file.exists(YAHOO_COOKIE_JAR))
+    if (file.exists(YAHOO_COOKIE_JAR)) {
+      message("Yahoo cookie jar size: ", file.info(YAHOO_COOKIE_JAR)$size)
+    }
+  }
+
+  # Step 2: get crumb using same cookie jar
+  args_crumb <- c(
+    "-L",
+    "--http1.1",
+    "--ipv4",
+    "-A", ua,
+    "-c", YAHOO_COOKIE_JAR,
+    "-b", YAHOO_COOKIE_JAR,
+    "https://query2.finance.yahoo.com/v1/test/getcrumb"
+  )
+
+  crumb_out <- tryCatch(
+    system2(curl_bin, args = args_crumb, stdout = TRUE, stderr = TRUE),
+    error = function(e) e
+  )
+
+  if (inherits(crumb_out, "error")) {
+    if (debug) message("Yahoo crumb fetch error: ", crumb_out$message)
+    YAHOO_CRUMB <<- NA_character_
+    return(NA_character_)
+  }
+
+  crumb <- paste(crumb_out, collapse = "")
+  crumb <- trimws(crumb)
+
+  # Bad crumbs sometimes contain HTML/errors or are empty.
+  if (
+    !nzchar(crumb) ||
+      grepl("<html|Too Many Requests|Unauthorized|Forbidden", crumb, ignore.case = TRUE)
+  ) {
+    if (debug) {
+      message("Yahoo crumb looked invalid. First 300 chars:")
+      message(substr(crumb, 1, 300))
+    }
+
+    YAHOO_CRUMB <<- NA_character_
+    return(NA_character_)
+  }
+
+  YAHOO_CRUMB <<- crumb
+
+  if (debug) {
+    message("Yahoo crumb acquired. First chars: ", substr(YAHOO_CRUMB, 1, 12))
+  }
+
+  YAHOO_CRUMB
+}
+
+reset_yahoo_session <- function() {
+  YAHOO_CRUMB <<- NA_character_
+
+  if (file.exists(YAHOO_COOKIE_JAR)) {
+    unlink(YAHOO_COOKIE_JAR)
+  }
+
+  invisible(NULL)
+}
+
 fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, debug = FALSE) {
   if (is.na(from) || is.na(to) || !nzchar(sym)) return(FALSE)
 
@@ -221,31 +329,45 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
   period1 <- date_to_unix(from, end_of_day = FALSE)
   period2 <- date_to_unix(to, end_of_day = TRUE)
 
-url <- paste0(
-  "https://query2.finance.yahoo.com/v8/finance/chart/", sym,
-  "?period1=", period1,
-  "&period2=", period2,
-  "&interval=1d&includeAdjustedClose=true"
-)
-
   curl_bin <- Sys.which("curl")
   if (!nzchar(curl_bin)) stop("curl not found on system")
 
-  args <- c(
-    "--http1.1",
-    "--ipv4",
-    "-L",
-    "--compressed",
-    "--silent",
-    "--show-error",
-    "--user-agent", "Mozilla/5.0",
-    "--header", "Accept:application/json",
-    "--output", dest_json,
-    url
-  )
+  ua <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
   for (k in seq_len(retries)) {
     if (file.exists(dest_json)) unlink(dest_json)
+
+    crumb <- get_yahoo_crumb(debug = debug)
+
+    if (is.na(crumb) || !nzchar(crumb)) {
+      if (debug) message("No valid Yahoo crumb available on attempt ", k)
+      reset_yahoo_session()
+      Sys.sleep(min(2^k, 8))
+      next
+    }
+
+    url <- paste0(
+      "https://query2.finance.yahoo.com/v8/finance/chart/", sym,
+      "?period1=", period1,
+      "&period2=", period2,
+      "&interval=1d&includeAdjustedClose=true",
+      "&crumb=", utils::URLencode(crumb, reserved = TRUE)
+    )
+
+    args <- c(
+      "-L",
+      "--http1.1",
+      "--ipv4",
+      "--compressed",
+      "--silent",
+      "--show-error",
+      "-A", ua,
+      "--header", "Accept:application/json",
+      "-c", YAHOO_COOKIE_JAR,
+      "-b", YAHOO_COOKIE_JAR,
+      "--output", dest_json,
+      url
+    )
 
     out <- tryCatch(
       system2(curl_bin, args = args, stdout = TRUE, stderr = TRUE),
@@ -256,32 +378,65 @@ url <- paste0(
     if (is.null(status)) status <- 0L
 
     if (debug) {
-      cat("Attempt:", k, "\n")
-      cat("Yahoo symbol:", sym, "\n")
-      cat("URL:", url, "\n")
-      cat("Status:", status, "\n")
-      cat("File exists:", file.exists(dest_json), "\n")
-      if (file.exists(dest_json)) cat("File size:", file.info(dest_json)$size, "\n")
+      safe_url <- gsub(crumb, "REDACTED", url, fixed = TRUE)
+
+      cat("Attempt:", k, "
+")
+      cat("Yahoo symbol:", sym, "
+")
+      cat("URL:", safe_url, "
+")
+      cat(
+        "period1:", period1, "=>",
+        as.character(as.POSIXct(period1, origin = "1970-01-01", tz = "UTC")),
+        "
+"
+      )
+      cat(
+        "period2:", period2, "=>",
+        as.character(as.POSIXct(period2, origin = "1970-01-01", tz = "UTC")),
+        "
+"
+      )
+      cat("period2 > period1:", period2 > period1, "
+")
+      cat("Status:", status, "
+")
+      cat("File exists:", file.exists(dest_json), "
+")
+      if (file.exists(dest_json)) cat("File size:", file.info(dest_json)$size, "
+")
     }
 
     if (
       identical(as.integer(status), 0L) &&
-      file.exists(dest_json) &&
-      file.info(dest_json)$size > 0
+        file.exists(dest_json) &&
+        file.info(dest_json)$size > 0
     ) {
-      txt <- paste(readLines(dest_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+      txt <- paste(readLines(dest_json, warn = FALSE, encoding = "UTF-8"), collapse = "
+")
+
+      if (debug) {
+        message("Yahoo response first 300 chars:")
+        message(substr(txt, 1, 300))
+      }
 
       if (
         grepl('"chart"', txt, fixed = TRUE) &&
-        !grepl("Too Many Requests", txt, fixed = TRUE)
+          grepl('"result":[', txt, fixed = TRUE) &&
+          !grepl("Too Many Requests", txt, fixed = TRUE) &&
+          !grepl('"error":{"code"', txt, fixed = TRUE)
       ) {
         return(TRUE)
       }
 
+      # If Yahoo gives a bad response, reset cookie/crumb and retry.
       if (debug) {
         message("Yahoo response did not pass validation. First 800 chars:")
         message(substr(txt, 1, 800))
       }
+
+      reset_yahoo_session()
     }
 
     Sys.sleep(min(2^k, 8))
@@ -294,7 +449,8 @@ read_yahoo_chart_json <- function(path) {
   if (!file.exists(path)) return(empty_px_tbl())
 
   txt <- tryCatch(
-    paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n"),
+    paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "
+"),
     error = function(e) ""
   )
 
@@ -382,7 +538,8 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
   if (!ok) {
     if (debug && file.exists(tmp_json)) {
       txt_dbg <- tryCatch(
-        paste(readLines(tmp_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n"),
+        paste(readLines(tmp_json, warn = FALSE, encoding = "UTF-8"), collapse = "
+"),
         error = function(e) ""
       )
 
@@ -397,7 +554,8 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
 
   if (debug && file.exists(tmp_json)) {
     txt_dbg <- tryCatch(
-      paste(readLines(tmp_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n"),
+      paste(readLines(tmp_json, warn = FALSE, encoding = "UTF-8"), collapse = "
+"),
       error = function(e) ""
     )
 
@@ -422,7 +580,7 @@ get_px_via_stooq <- function(sym, from, to, debug = DEBUG_YAHOO) {
 
   # Stooq fallback mainly supports US tickers with .us suffix.
   # Skip foreign/exchange suffix symbols like BRBY.L, ATZ.TO, etc.
-  if (grepl("\\.", sym0)) {
+  if (grepl("\.", sym0)) {
     if (debug) message("Skipping Stooq for non-US/suffixed symbol: ", sym0)
     return(empty_px_tbl())
   }
@@ -482,7 +640,8 @@ get_px_via_stooq <- function(sym, from, to, debug = DEBUG_YAHOO) {
 
   if (!is.data.frame(px) || nrow(px) == 0 || !"Date" %in% names(px)) {
     if (debug && file.exists(tmp_csv)) {
-      txt_dbg <- paste(readLines(tmp_csv, warn = FALSE), collapse = "\n")
+      txt_dbg <- paste(readLines(tmp_csv, warn = FALSE), collapse = "
+")
       message("Bad Stooq response first 500 chars:")
       message(substr(txt_dbg, 1, 500))
     }
@@ -1779,9 +1938,6 @@ DBI::dbGetQuery(
     target_tbl_q
   )
 ) %>% print()
-
-
-
 
 
 
