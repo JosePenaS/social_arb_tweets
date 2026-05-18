@@ -120,12 +120,12 @@ normalize_symbol_for_yahoo <- function(sym) {
   sym <- toupper(trimws(as.character(sym)))
 
   # Keep common Yahoo exchange suffixes like ATZ.TO, SHOP.TO, BHP.AX, VOD.L, etc.
-  if (grepl("\.(TO|V|L|AX|SA|MX|PA|AS|DE|F|HK|SS|SZ|T)$", sym)) {
+  if (grepl("\\.(TO|V|L|AX|SA|MX|PA|AS|DE|F|HK|SS|SZ|T)$", sym)) {
     return(sym)
   }
 
   # Convert US share-class tickers like BRK.B / BF.B to BRK-B / BF-B.
-  gsub("\.", "-", sym)
+  gsub("\\.", "-", sym)
 }
 
 date_to_unix <- function(x, end_of_day = FALSE) {
@@ -589,7 +589,7 @@ get_px_via_stooq <- function(sym, from, to, debug = DEBUG_YAHOO) {
 
   # Stooq fallback mainly supports US tickers with .us suffix.
   # Skip foreign/exchange suffix symbols like BRBY.L, ATZ.TO, etc.
-  if (grepl("\.", sym0)) {
+  if (grepl("\\.", sym0)) {
     if (debug) message("Skipping Stooq for non-US/suffixed symbol: ", sym0)
     return(empty_px_tbl())
   }
