@@ -120,12 +120,12 @@ normalize_symbol_for_yahoo <- function(sym) {
   sym <- toupper(trimws(as.character(sym)))
 
   # Keep common Yahoo exchange suffixes like ATZ.TO, SHOP.TO, BHP.AX, VOD.L, etc.
-  if (grepl("\\.(TO|V|L|AX|SA|MX|PA|AS|DE|F|HK|SS|SZ|T)$", sym)) {
+  if (grepl("\.(TO|V|L|AX|SA|MX|PA|AS|DE|F|HK|SS|SZ|T)$", sym)) {
     return(sym)
   }
 
   # Convert US share-class tickers like BRK.B / BF.B to BRK-B / BF-B.
-  gsub("\\.", "-", sym)
+  gsub("\.", "-", sym)
 }
 
 date_to_unix <- function(x, end_of_day = FALSE) {
@@ -220,6 +220,15 @@ add_missing_columns <- function(con, table_schema, table_name, df) {
 YAHOO_COOKIE_JAR <- tempfile(fileext = ".cookies")
 YAHOO_CRUMB <- NA_character_
 
+# system2() can pass arguments through a shell on GitHub/Linux.
+# User-Agent strings contain spaces and parentheses, so quote them safely.
+shell_arg <- function(x) {
+  if (.Platform$OS.type == "windows") {
+    return(x)
+  }
+  shQuote(x)
+}
+
 get_yahoo_crumb <- function(debug = DEBUG_YAHOO) {
   if (!is.na(YAHOO_CRUMB) && nzchar(YAHOO_CRUMB) && file.exists(YAHOO_COOKIE_JAR)) {
     return(YAHOO_CRUMB)
@@ -240,11 +249,11 @@ get_yahoo_crumb <- function(debug = DEBUG_YAHOO) {
     "-L",
     "--http1.1",
     "--ipv4",
-    "-A", ua,
-    "-c", YAHOO_COOKIE_JAR,
-    "-b", YAHOO_COOKIE_JAR,
-    "--output", tmp_fc,
-    "https://fc.yahoo.com"
+    "--user-agent", shell_arg(ua),
+    "-c", shell_arg(YAHOO_COOKIE_JAR),
+    "-b", shell_arg(YAHOO_COOKIE_JAR),
+    "--output", shell_arg(tmp_fc),
+    shell_arg("https://fc.yahoo.com")
   )
 
   out_fc <- tryCatch(
@@ -268,10 +277,10 @@ get_yahoo_crumb <- function(debug = DEBUG_YAHOO) {
     "-L",
     "--http1.1",
     "--ipv4",
-    "-A", ua,
-    "-c", YAHOO_COOKIE_JAR,
-    "-b", YAHOO_COOKIE_JAR,
-    "https://query2.finance.yahoo.com/v1/test/getcrumb"
+    "--user-agent", shell_arg(ua),
+    "-c", shell_arg(YAHOO_COOKIE_JAR),
+    "-b", shell_arg(YAHOO_COOKIE_JAR),
+    shell_arg("https://query2.finance.yahoo.com/v1/test/getcrumb")
   )
 
   crumb_out <- tryCatch(
@@ -361,12 +370,12 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
       "--compressed",
       "--silent",
       "--show-error",
-      "-A", ua,
-      "--header", "Accept:application/json",
-      "-c", YAHOO_COOKIE_JAR,
-      "-b", YAHOO_COOKIE_JAR,
-      "--output", dest_json,
-      url
+      "--user-agent", shell_arg(ua),
+      "--header", shell_arg("Accept:application/json"),
+      "-c", shell_arg(YAHOO_COOKIE_JAR),
+      "-b", shell_arg(YAHOO_COOKIE_JAR),
+      "--output", shell_arg(dest_json),
+      shell_arg(url)
     )
 
     out <- tryCatch(
@@ -580,7 +589,7 @@ get_px_via_stooq <- function(sym, from, to, debug = DEBUG_YAHOO) {
 
   # Stooq fallback mainly supports US tickers with .us suffix.
   # Skip foreign/exchange suffix symbols like BRBY.L, ATZ.TO, etc.
-  if (grepl("\\.", sym0)) {
+  if (grepl("\.", sym0)) {
     if (debug) message("Skipping Stooq for non-US/suffixed symbol: ", sym0)
     return(empty_px_tbl())
   }
@@ -606,9 +615,9 @@ get_px_via_stooq <- function(sym, from, to, debug = DEBUG_YAHOO) {
     "-L",
     "--silent",
     "--show-error",
-    "--user-agent", "Mozilla/5.0",
-    "--output", tmp_csv,
-    url
+    "--user-agent", shell_arg("Mozilla/5.0"),
+    "--output", shell_arg(tmp_csv),
+    shell_arg(url)
   )
 
   out <- tryCatch(
@@ -1938,6 +1947,7 @@ DBI::dbGetQuery(
     target_tbl_q
   )
 ) %>% print()
+
 
 
 
