@@ -196,45 +196,45 @@ make_ts_key <- function(x) {
 
 fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, debug = DEBUG_YAHOO) {
   if (is.na(from) || is.na(to) || !nzchar(sym)) return(FALSE)
-
+  
   yahoo_sym <- normalize_symbol_for_yahoo(sym)
-
+  
   period1 <- date_to_unix(from, end_of_day = FALSE)
   period2 <- date_to_unix(to, end_of_day = TRUE)
-
+  
   url <- paste0(
     "https://query2.finance.yahoo.com/v8/finance/chart/", yahoo_sym,
     "?period1=", period1,
     "&period2=", period2,
     "&interval=1d&includeAdjustedClose=true"
   )
-
+  
   curl_bin <- Sys.which("curl")
   if (!nzchar(curl_bin)) stop("curl not found on system")
-
+  
   args <- c(
     "--http1.1",
     "--ipv4",
     "-sS",
     "-L",
     "--compressed",
-    "--user-agent", "Mozilla/5.0",
-    "--header", "Accept: application/json",
-    "--output", dest_json,
+    "-A", "Mozilla/5.0",
+    "-H", "Accept:application/json",
+    "-o", dest_json,
     url
   )
-
+  
   for (k in seq_len(retries)) {
     if (file.exists(dest_json)) unlink(dest_json)
-
+    
     out <- tryCatch(
       system2(curl_bin, args = args, stdout = TRUE, stderr = TRUE),
       error = function(e) e
     )
-
+    
     status <- if (inherits(out, "error")) 1L else attr(out, "status")
     if (is.null(status)) status <- 0L
-
+    
     if (debug) {
       cat("Attempt:", k, "\n")
       cat("Yahoo symbol:", yahoo_sym, "\n")
@@ -245,36 +245,40 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
       cat("Status:", status, "\n")
       cat("File exists:", file.exists(dest_json), "\n")
       if (file.exists(dest_json)) cat("File size:", file.info(dest_json)$size, "\n")
+      if (length(out) > 0) {
+        cat("curl output:\n")
+        cat(paste(out, collapse = "\n"), "\n")
+      }
     }
-
+    
     if (
       identical(as.integer(status), 0L) &&
       file.exists(dest_json) &&
       file.info(dest_json)$size > 0
     ) {
       txt <- paste(readLines(dest_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
-
+      
       if (debug) {
         cat("Yahoo response first 300 chars:\n")
         cat(substr(txt, 1, 300), "\n")
       }
-
+      
       if (
         grepl('"chart"', txt, fixed = TRUE) &&
         !grepl("Too Many Requests", txt, fixed = TRUE)
       ) {
         return(TRUE)
       }
-
+      
       if (grepl("Too Many Requests", txt, fixed = TRUE)) {
         Sys.sleep(min(2^k, 10))
         next
       }
     }
-
+    
     Sys.sleep(min(2^k, 10))
   }
-
+  
   FALSE
 }
 
