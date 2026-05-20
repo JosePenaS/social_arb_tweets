@@ -4,29 +4,36 @@ on:
   workflow_dispatch:
     inputs:
       force_rebuild:
-        description: "Force rebuild all rows? Use true only when you want to recalculate everything."
+        description: "Force rebuild all rows? Use true only when you intentionally want to recalculate everything."
         required: false
         default: "false"
+
       max_rows:
-        description: "Max rows to process. Use Inf for all missing rows."
+        description: "Max rows to process. Use Inf for all selected rows."
         required: false
         default: "Inf"
+
       as_of_date:
         description: "Optional AS_OF_DATE in YYYY-MM-DD. Leave blank to use current New York date."
         required: false
         default: ""
 
+      new_signal_lookback_days:
+        description: "Only process new signals from the last N days. Open trades are refreshed regardless of age."
+        required: false
+        default: "31"
+
   schedule:
-    # Approx 9:00 AM New York during EST
+    # 9:00 AM New York during EST
     - cron: "0 14 * * 1-5"
 
-    # Approx 9:00 AM New York during EDT
+    # 9:00 AM New York during EDT
     - cron: "0 13 * * 1-5"
 
-    # Approx 3:30 PM New York during EST
+    # 3:30 PM New York during EST
     - cron: "30 20 * * 1-5"
 
-    # Approx 3:30 PM New York during EDT
+    # 3:30 PM New York during EDT
     - cron: "30 19 * * 1-5"
 
 jobs:
@@ -46,22 +53,34 @@ jobs:
       X_BEARER: ${{ secrets.X_BEARER }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      # Backtest settings
-      STRATEGY_LABEL: "tp10_sl5"
+      # Backtest tables
       SIGNALS_TABLE: "twitter_trade_signals"
       BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy"
+
+      # Strategy settings
+      STRATEGY_LABEL: "tp10_sl5"
       TARGET_PCT: "0.10"
       STOP_PCT: "0.05"
       LOOKBACK_DAYS: "30"
       LOCKUP_DAYS: "30"
       SMA_LEN: "10"
+
+      # Yahoo cache
       CACHE_DIR: "cache_px_tp10_sl5"
 
-      # Important: keep Yahoo debug off unless testing
+      # Important: keep Yahoo logs quiet during scheduled runs
       DEBUG_YAHOO: "false"
 
-      # Default behavior: only process rows missing volatility_20d/open-needed refresh logic
+      # Normal production behavior:
+      # - false = only new recent signals + open trades
+      # - true = rerun everything
       FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
+
+      # Only new signals within this window are processed.
+      # Open/uncompleted trades are still refreshed regardless of age.
+      NEW_SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.new_signal_lookback_days || '31' }}
+
+      # Optional manual controls
       MAX_ROWS_LOCAL: ${{ github.event.inputs.max_rows || 'Inf' }}
       AS_OF_DATE: ${{ github.event.inputs.as_of_date || '' }}
 
@@ -100,6 +119,8 @@ jobs:
             any::TTR
             any::glue
             any::httr2
+            any::tidyr
+            any::readr
 
       - name: Restore Yahoo price cache
         uses: actions/cache@v4
