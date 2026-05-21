@@ -71,10 +71,13 @@ jobs:
       # Keep Yahoo logs quiet during normal runs
       DEBUG_YAHOO: "false"
 
-      # Production behavior
+      # Production behavior:
+      # false = only new recent signals + open/uncompleted trades
+      # true = rerun every valid signal
       FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
 
-      # Only new signals within this window are processed
+      # Only new signals within this window are processed.
+      # Open/uncompleted trades are refreshed regardless of age.
       NEW_SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.new_signal_lookback_days || '30' }}
 
       # Optional manual controls
@@ -84,40 +87,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Debug repo before running scripts
-        run: |
-          echo "Current branch/commit:"
-          git branch --show-current || true
-          git rev-parse HEAD || true
-
-          echo ""
-          echo "List R files:"
-          find . -maxdepth 2 -name "*.R" -print | sort
-
-          echo ""
-          echo "Searching ALL R files for problematic Yahoo curl headers..."
-          grep -R -n "application/json\|Accept:" . --include="*.R" || true
-
-          echo ""
-          echo "Searching ALL R files for refresh_backtest_results banner..."
-          grep -R -n "RUNNING FILE: refresh_backtest_results" . --include="*.R" || true
-
-          echo ""
-          echo "Searching ALL R files for fetch_yahoo_chart_syscurl definitions..."
-          grep -R -n "fetch_yahoo_chart_syscurl" . --include="*.R" || true
-
-          echo ""
-          echo "First 40 lines of generate_tweet_signals.R if it exists:"
-          if [ -f "generate_tweet_signals.R" ]; then
-            head -n 40 generate_tweet_signals.R
-          else
-            echo "generate_tweet_signals.R not found."
-          fi
-
-          echo ""
-          echo "First 80 lines of refresh_backtest_results.R:"
-          head -n 80 refresh_backtest_results.R
 
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
@@ -132,7 +101,15 @@ jobs:
             libpq-dev \
             libssl-dev \
             libcurl4-openssl-dev \
-            libxml2-dev
+            libxml2-dev \
+            libgit2-dev \
+            libfontconfig1-dev \
+            libharfbuzz-dev \
+            libfribidi-dev \
+            libfreetype6-dev \
+            libpng-dev \
+            libtiff5-dev \
+            libjpeg-dev
 
       - name: Install R package dependencies
         uses: r-lib/actions/setup-r-dependencies@v2
@@ -152,6 +129,7 @@ jobs:
             any::httr2
             any::tidyr
             any::readr
+            any::tidyquant
 
       - name: Restore Yahoo price cache
         uses: actions/cache@v4
@@ -176,6 +154,15 @@ jobs:
           else
             echo "generate_tweet_signals.R not found, skipping signal generation."
           fi
+
+      - name: Debug refresh file contents
+        run: |
+          echo "Checking for problematic Yahoo curl headers..."
+          grep -n "application/json\|Accept:" refresh_backtest_results.R || true
+          echo "Checking Yahoo fetch function definition..."
+          grep -n "fetch_yahoo_chart_syscurl" refresh_backtest_results.R || true
+          echo "Checking production selection logic..."
+          grep -n "NEW_SIGNAL_LOOKBACK_DAYS\|new_recent_signals\|open_signals" refresh_backtest_results.R || true
 
       - name: Refresh backtest results
         run: Rscript refresh_backtest_results.R
