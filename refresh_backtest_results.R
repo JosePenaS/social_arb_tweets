@@ -46,6 +46,7 @@ get_default_as_of_date <- function() {
 STRATEGY_LABEL <- Sys.getenv("STRATEGY_LABEL", "tp10_sl5")
 
 SIGNALS_TABLE <- Sys.getenv("SIGNALS_TABLE", "twitter_trade_signals")
+
 TARGET_TABLE_NAME <- Sys.getenv(
   "BACKTEST_TABLE",
   "twitter_backtest_results_10_perc_strategy"
@@ -61,7 +62,14 @@ SMA_LEN <- env_num("SMA_LEN", 10)
 CACHE_DIR <- Sys.getenv("CACHE_DIR", "cache_px_tp10_sl5")
 
 DEBUG_YAHOO <- env_bool("DEBUG_YAHOO", FALSE)
+
+# Normally FALSE.
+# If TRUE, reruns every valid signal.
 FORCE_REBUILD <- env_bool("FORCE_REBUILD", FALSE)
+
+# Only new signals from this many days back are processed.
+# Open/uncompleted trades are refreshed regardless of age.
+NEW_SIGNAL_LOOKBACK_DAYS <- env_num("NEW_SIGNAL_LOOKBACK_DAYS", 31)
 
 MAX_ROWS_LOCAL <- env_int_or_inf("MAX_ROWS_LOCAL", Inf)
 
@@ -76,13 +84,17 @@ if (is.na(AS_OF_DATE)) {
   stop("AS_OF_DATE could not be parsed. Use format YYYY-MM-DD.")
 }
 
-cat("RUNNING FILE: refresh_backtest_results.R | NO-CRUMB YAHOO CHART VERSION\n")
+NEW_SIGNAL_CUTOFF <- AS_OF_DATE - lubridate::days(NEW_SIGNAL_LOOKBACK_DAYS)
+
+cat("RUNNING FILE: refresh_backtest_results.R | PRODUCTION REFRESH VERSION\n")
 cat("Strategy label:", STRATEGY_LABEL, "\n")
 cat("Target table: public.", TARGET_TABLE_NAME, "\n", sep = "")
 cat("Target pct:", TARGET_PCT, "\n")
 cat("Stop pct:", STOP_PCT, "\n")
 cat("Local TZ: America/New_York\n")
 cat("As-of date:", as.character(AS_OF_DATE), "\n")
+cat("New signal cutoff:", as.character(NEW_SIGNAL_CUTOFF), "\n")
+cat("New signal lookback days:", NEW_SIGNAL_LOOKBACK_DAYS, "\n")
 cat("Cache dir:", CACHE_DIR, "\n")
 cat("Debug Yahoo:", DEBUG_YAHOO, "\n")
 cat("Force rebuild:", FORCE_REBUILD, "\n")
@@ -106,7 +118,7 @@ connect_supabase <- function() {
   dbname <- Sys.getenv("SUPABASE_DB", "postgres")
   user <- Sys.getenv("SUPABASE_USER", "")
   password <- get_env_first("SUPABASE_PWD", "SUPABASE_PASSWORD")
-
+  
   if (!nzchar(host) || !nzchar(user) || !nzchar(password)) {
     stop(
       paste(
@@ -116,7 +128,7 @@ connect_supabase <- function() {
       )
     )
   }
-
+  
   DBI::dbConnect(
     RPostgres::Postgres(),
     host = host,
@@ -129,11 +141,14 @@ connect_supabase <- function() {
 }
 
 con <- connect_supabase()
+
 on.exit({
   try(DBI::dbDisconnect(con), silent = TRUE)
 }, add = TRUE)
 
 cat("Supabase connected.\n")
+
+qid <- function(x) as.character(DBI::dbQuoteIdentifier(con, x))
 
 ###############################################################################
 # 2 · Helpers -----------------------------------------------------------------
@@ -143,9 +158,9 @@ cat("Supabase connected.\n")
 
 as_logicalish <- function(x) {
   if (is.logical(x)) return(x)
-
+  
   y <- tolower(trimws(as.character(x)))
-
+  
   dplyr::case_when(
     is.na(y) ~ NA,
     y %in% c("true", "t", "1", "yes", "y") ~ TRUE,
@@ -156,7 +171,7 @@ as_logicalish <- function(x) {
 
 normalize_symbol_for_yahoo <- function(sym) {
   sym <- toupper(trimws(as.character(sym)))
-
+  
   # Do not convert all dots to hyphens.
   # Exchange suffixes like BRBY.L should stay as BRBY.L.
   dplyr::case_when(
@@ -185,9 +200,30 @@ safe_max_date <- function(x) {
 }
 
 make_ts_key <- function(x) {
-  x <- as.POSIXct(x, tz = "America/New_York")
-  x <- lubridate::with_tz(x, "America/New_York")
-  format(x, "%Y%m%d%H%M%S")
+  x <- suppressWarnings(as.POSIXct(x, tz = "America/New_York"))
+  out <- format(lubridate::with_tz(x, "America/New_York"), "%Y%m%d%H%M%S")
+  out[is.na(x)] <- "NA"
+  out
+}
+
+build_signal_key <- function(signal_id, username, conversation_id, ticker, tweet_ts_et) {
+  signal_id_clean <- trimws(as.character(signal_id))
+  signal_id_clean[is.na(signal_id_clean)] <- ""
+  
+  fallback_key <- paste(
+    "fallback",
+    as.character(username),
+    as.character(conversation_id),
+    toupper(as.character(ticker)),
+    make_ts_key(tweet_ts_et),
+    sep = "__"
+  )
+  
+  ifelse(
+    nzchar(signal_id_clean),
+    paste0("signal_id::", signal_id_clean),
+    fallback_key
+  )
 }
 
 ###############################################################################
@@ -212,6 +248,10 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
   curl_bin <- Sys.which("curl")
   if (!nzchar(curl_bin)) stop("curl not found on system")
   
+  # IMPORTANT:
+  # Do NOT add Accept/application-json headers here.
+  # In GitHub Actions, the old header caused:
+  # curl: (6) Could not resolve host: application
   args <- c(
     "--http1.1",
     "--ipv4",
@@ -219,7 +259,6 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
     "-L",
     "--compressed",
     "-A", "Mozilla/5.0",
-    "-H", "Accept:application/json",
     "-o", dest_json,
     url
   )
@@ -239,6 +278,8 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
       cat("Attempt:", k, "\n")
       cat("Yahoo symbol:", yahoo_sym, "\n")
       cat("URL:", url, "\n")
+      cat("Curl args:\n")
+      cat(paste(args, collapse = " "), "\n")
       cat("period1:", period1, "=>", as.character(as.POSIXct(period1, origin = "1970-01-01", tz = "UTC")), "\n")
       cat("period2:", period2, "=>", as.character(as.POSIXct(period2, origin = "1970-01-01", tz = "UTC")), "\n")
       cat("period2 > period1:", period2 > period1, "\n")
@@ -284,36 +325,36 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
 
 read_yahoo_chart_json <- function(path) {
   if (!file.exists(path)) return(tibble())
-
+  
   txt <- tryCatch(
     paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n"),
     error = function(e) ""
   )
-
+  
   if (!nzchar(txt)) return(tibble())
-
+  
   js <- tryCatch(jsonlite::fromJSON(txt, simplifyVector = FALSE), error = function(e) NULL)
-
+  
   if (is.null(js) || is.null(js$chart) || !is.null(js$chart$error)) {
     return(tibble())
   }
-
+  
   res <- js$chart$result
   if (is.null(res) || length(res) == 0) return(tibble())
-
+  
   res1 <- res[[1]]
   timestamps <- res1$timestamp
   quote_obj <- res1$indicators$quote[[1]]
-
+  
   if (is.null(timestamps) || is.null(quote_obj)) return(tibble())
-
+  
   ts_vec <- unlist(timestamps)
   open_vec <- unlist(quote_obj$open)
   high_vec <- unlist(quote_obj$high)
   low_vec <- unlist(quote_obj$low)
   close_vec <- unlist(quote_obj$close)
   vol_vec <- unlist(quote_obj$volume)
-
+  
   min_len <- min(
     length(ts_vec),
     length(open_vec),
@@ -322,9 +363,9 @@ read_yahoo_chart_json <- function(path) {
     length(close_vec),
     length(vol_vec)
   )
-
+  
   if (min_len == 0) return(tibble())
-
+  
   tibble(
     date = as.Date(as.POSIXct(ts_vec[seq_len(min_len)], origin = "1970-01-01", tz = "UTC")),
     open = suppressWarnings(as.numeric(open_vec[seq_len(min_len)])),
@@ -339,7 +380,7 @@ read_yahoo_chart_json <- function(path) {
 
 get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
   tmp_json <- tempfile(fileext = ".json")
-
+  
   ok <- fetch_yahoo_chart_syscurl(
     sym = sym,
     from = from,
@@ -347,9 +388,9 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
     dest_json = tmp_json,
     debug = debug
   )
-
+  
   if (!ok) return(tibble())
-
+  
   read_yahoo_chart_json(tmp_json) %>%
     filter(date >= as.Date(from), date <= as.Date(to)) %>%
     arrange(date)
@@ -357,18 +398,18 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
 
 get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_px_via_syscurl_yahoo) {
   if (is.na(from) || is.na(to) || !nzchar(sym)) return(tibble())
-
+  
   dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
-
+  
   safe_sym <- gsub("[^A-Za-z0-9_.-]", "_", normalize_symbol_for_yahoo(sym))
   fname <- file.path(cache_dir, paste0(safe_sym, ".rds"))
-
+  
   cached <- if (file.exists(fname)) {
     tryCatch(readRDS(fname), error = function(e) tibble())
   } else {
     tibble()
   }
-
+  
   if (!is.data.frame(cached) || nrow(cached) == 0) {
     cached <- tibble()
   } else {
@@ -377,32 +418,32 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
       filter(!is.na(date)) %>%
       arrange(date)
   }
-
+  
   need_from <- as.Date(from)
   need_to <- as.Date(to)
-
+  
   fetch_ranges <- list()
-
+  
   if (nrow(cached) == 0) {
     fetch_ranges <- list(c(need_from, need_to))
   } else {
     have_min <- min(cached$date, na.rm = TRUE)
     have_max <- max(cached$date, na.rm = TRUE)
-
+    
     if (need_from < have_min) {
       fetch_ranges <- append(fetch_ranges, list(c(need_from, have_min - days(1))))
     }
-
+    
     if (need_to > have_max) {
       fetch_ranges <- append(fetch_ranges, list(c(have_max + days(1), need_to)))
     }
   }
-
+  
   if (length(fetch_ranges) > 0) {
     for (rng in fetch_ranges) {
       fr <- as.Date(rng[1])
       tr <- as.Date(rng[2])
-
+      
       if (!is.na(fr) && !is.na(tr) && fr <= tr) {
         fresh <- tryCatch(
           fetch_fn(sym = sym, from = fr, to = tr),
@@ -411,20 +452,20 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
             tibble()
           }
         )
-
+        
         if (nrow(fresh) > 0) {
           cached <- bind_rows(cached, fresh) %>%
             distinct(date, .keep_all = TRUE) %>%
             arrange(date)
-
+          
           saveRDS(cached, fname)
         }
       }
     }
   }
-
+  
   if (nrow(cached) == 0) return(tibble())
-
+  
   cached %>%
     filter(date >= need_from, date <= need_to) %>%
     arrange(date)
@@ -533,64 +574,55 @@ signals <- signals_src %>%
     !is.na(ticker),
     ticker != "",
     side %in% c("long", "short")
+  ) %>%
+  mutate(
+    signal_key = build_signal_key(
+      signal_id = signal_id,
+      username = username,
+      conversation_id = conversation_id,
+      ticker = ticker,
+      tweet_ts_et = tweet_ts_et
+    )
   )
 
 cat("Prepared valid signals:", nrow(signals), "\n")
+cat("Latest signal date:", as.character(max(signals$signal_date, na.rm = TRUE)), "\n")
 
 ###############################################################################
-# 6 · Existing table / processing keys -----------------------------------------
+# 6 · Select rows to process ---------------------------------------------------
 ###############################################################################
 
 target_tbl <- DBI::Id(schema = "public", table = TARGET_TABLE_NAME)
 target_exists <- DBI::dbExistsTable(con, target_tbl)
 
-existing_fields <- if (target_exists) {
-  DBI::dbListFields(con, target_tbl)
-} else {
-  character()
-}
-
-key_mode <- if (
-  target_exists &&
-  "signal_id" %in% existing_fields &&
-  "signal_id" %in% names(signals)
-) {
-  "signal_id"
-} else if (!target_exists && "signal_id" %in% names(signals)) {
-  "signal_id"
-} else {
-  "fallback"
-}
-
-cat("Processing key mode:", key_mode, "\n")
-
-make_processing_key <- function(dat, mode = key_mode) {
-  if (mode == "signal_id" && "signal_id" %in% names(dat)) {
-    return(paste0("signal_id::", as.character(dat$signal_id)))
+get_existing_backtest <- function() {
+  if (!target_exists) {
+    return(
+      tibble(
+        signal_id = character(),
+        username = character(),
+        conversation_id = character(),
+        ticker = character(),
+        tweet_ts_et = as.POSIXct(character()),
+        trade_id = character(),
+        completed = logical(),
+        trade_status = character(),
+        signal_key = character()
+      )
+    )
   }
-
-  paste(
-    STRATEGY_LABEL,
-    as.character(dat$username),
-    as.character(dat$conversation_id),
-    str_to_upper(as.character(dat$ticker)),
-    make_ts_key(dat$tweet_ts_et),
-    sep = "__"
-  )
-}
-
-signals <- signals %>%
-  mutate(processing_key = make_processing_key(.))
-
-get_existing_processed_keys <- function() {
-  if (!target_exists) return(character())
-
+  
   target_tbl_q <- as.character(DBI::dbQuoteIdentifier(con, target_tbl))
-
-  if (!"volatility_20d" %in% existing_fields) {
-    return(character())
+  existing_fields <- DBI::dbListFields(con, target_tbl)
+  
+  field_expr <- function(col, default_sql, alias = col) {
+    if (col %in% existing_fields) {
+      sprintf("%s AS %s", qid(col), qid(alias))
+    } else {
+      sprintf("%s AS %s", default_sql, qid(alias))
+    }
   }
-
+  
   where_strategy <- if ("strategy_label" %in% existing_fields) {
     sprintf(
       "WHERE strategy_label = %s",
@@ -599,84 +631,108 @@ get_existing_processed_keys <- function() {
   } else {
     ""
   }
-
-  if (key_mode == "signal_id" && "signal_id" %in% existing_fields) {
-    sql <- sprintf(
-      "
-      SELECT signal_id, volatility_20d
-      FROM %s
-      %s
-      ",
-      target_tbl_q,
-      where_strategy
-    )
-
-    existing <- DBI::dbGetQuery(con, sql) %>%
-      as_tibble() %>%
-      filter(!is.na(volatility_20d), !is.na(signal_id), nzchar(as.character(signal_id))) %>%
-      mutate(processing_key = paste0("signal_id::", as.character(signal_id)))
-
-    return(unique(existing$processing_key))
-  }
-
-  needed_cols <- c("username", "conversation_id", "ticker", "tweet_ts_et", "volatility_20d")
-  if (!all(needed_cols %in% existing_fields)) {
-    return(character())
-  }
-
+  
   sql <- sprintf(
     "
-    SELECT username, conversation_id, ticker, tweet_ts_et, volatility_20d
+    SELECT
+      %s,
+      %s,
+      %s,
+      %s,
+      %s,
+      %s,
+      %s,
+      %s
     FROM %s
-    %s
+    %s;
     ",
+    field_expr("signal_id", "NULL::text"),
+    field_expr("username", "NULL::text"),
+    field_expr("conversation_id", "NULL::text"),
+    field_expr("ticker", "NULL::text"),
+    field_expr("tweet_ts_et", "NULL::timestamptz"),
+    field_expr("trade_id", "NULL::text"),
+    field_expr("completed", "TRUE"),
+    field_expr("trade_status", "'completed'::text"),
     target_tbl_q,
     where_strategy
   )
-
-  existing <- DBI::dbGetQuery(con, sql) %>%
+  
+  DBI::dbGetQuery(con, sql) %>%
     as_tibble() %>%
-    filter(!is.na(volatility_20d)) %>%
     mutate(
+      signal_id = as.character(signal_id),
       username = as.character(username),
       conversation_id = as.character(conversation_id),
       ticker = str_to_upper(as.character(ticker)),
       tweet_ts_et = as.POSIXct(tweet_ts_et, tz = "America/New_York"),
-      processing_key = make_processing_key(., mode = "fallback")
+      trade_id = as.character(trade_id),
+      completed = as.logical(completed),
+      trade_status = tolower(as.character(trade_status)),
+      signal_key = build_signal_key(
+        signal_id = signal_id,
+        username = username,
+        conversation_id = conversation_id,
+        ticker = ticker,
+        tweet_ts_et = tweet_ts_et
+      )
     )
-
-  unique(existing$processing_key)
 }
 
-existing_good_keys <- get_existing_processed_keys()
+existing_backtest <- get_existing_backtest()
 
-if (target_exists) {
-  existing_n <- DBI::dbGetQuery(
-    con,
-    sprintf(
-      "SELECT COUNT(*) AS n FROM %s;",
-      as.character(DBI::dbQuoteIdentifier(con, target_tbl))
-    )
-  )$n[[1]]
+cat("Existing backtest rows:", nrow(existing_backtest), "\n")
 
-  cat("Existing backtest rows:", existing_n, "\n")
-  cat("Existing rows with usable volatility keys:", length(existing_good_keys), "\n")
-} else {
-  cat("Target backtest table does not exist yet. It will be created.\n")
-}
+existing_keys <- existing_backtest %>%
+  filter(!is.na(signal_key), nzchar(signal_key)) %>%
+  distinct(signal_key)
+
+open_keys <- existing_backtest %>%
+  filter(
+    is.na(completed) |
+      completed != TRUE |
+      is.na(trade_status) |
+      trade_status != "completed"
+  ) %>%
+  filter(!is.na(signal_key), nzchar(signal_key)) %>%
+  distinct(signal_key)
 
 if (FORCE_REBUILD) {
+  
   signals_run <- signals
+  
+  cat("FORCE_REBUILD is TRUE. All valid signals will be processed.\n")
+  
 } else {
-  signals_run <- signals %>%
-    filter(!(processing_key %in% existing_good_keys))
+  
+  # New signals only if they happened within the last month/lookback window.
+  new_recent_signals <- signals %>%
+    filter(
+      signal_date >= NEW_SIGNAL_CUTOFF,
+      signal_date <= AS_OF_DATE
+    ) %>%
+    anti_join(existing_keys, by = "signal_key")
+  
+  # Existing open/uncompleted trades are refreshed regardless of age.
+  open_signals <- signals %>%
+    semi_join(open_keys, by = "signal_key")
+  
+  signals_run <- bind_rows(
+    open_signals,
+    new_recent_signals
+  ) %>%
+    distinct(signal_key, .keep_all = TRUE)
+  
+  cat("New recent signals to process:", nrow(new_recent_signals), "\n")
+  cat("Open existing signals to refresh:", nrow(open_signals), "\n")
 }
 
 if (is.finite(MAX_ROWS_LOCAL)) {
-  signals_run <- signals_run %>% slice_head(n = MAX_ROWS_LOCAL)
+  signals_run <- signals_run %>%
+    slice_head(n = MAX_ROWS_LOCAL)
 }
 
-cat("Rows to process:", nrow(signals_run), "\n")
+cat("Total rows to process:", nrow(signals_run), "\n")
 
 if (nrow(signals_run) == 0) {
   cat("No rows to process. Exiting.\n")
@@ -688,30 +744,34 @@ if (nrow(signals_run) == 0) {
 ###############################################################################
 
 pick_entry_from_px <- function(px, tweet_ts_et) {
-  tweet_ts_et <- lubridate::with_tz(as.POSIXct(tweet_ts_et, tz = "America/New_York"), "America/New_York")
+  tweet_ts_et <- lubridate::with_tz(
+    as.POSIXct(tweet_ts_et, tz = "America/New_York"),
+    "America/New_York"
+  )
+  
   tweet_date <- as.Date(tweet_ts_et)
   tweet_time <- format(tweet_ts_et, "%H:%M:%S")
-
+  
   available_dates <- px$date
   same_day_exists <- tweet_date %in% available_dates
-
+  
   if (!same_day_exists) {
     next_date <- suppressWarnings(min(available_dates[available_dates > tweet_date], na.rm = TRUE))
     if (is.infinite(next_date)) next_date <- as.Date(NA)
     return(list(entry_date = next_date, entry_at = "open"))
   }
-
+  
   if (tweet_time < "09:00:00") {
     return(list(entry_date = tweet_date, entry_at = "open"))
   }
-
+  
   if (tweet_time < "15:30:00") {
     return(list(entry_date = tweet_date, entry_at = "close"))
   }
-
+  
   next_date <- suppressWarnings(min(available_dates[available_dates > tweet_date], na.rm = TRUE))
   if (is.infinite(next_date)) next_date <- as.Date(NA)
-
+  
   list(entry_date = next_date, entry_at = "open")
 }
 
@@ -725,19 +785,19 @@ simulate_trade <- function(ticker,
                            target_pct = TARGET_PCT,
                            stop_pct = STOP_PCT,
                            as_of_date = AS_OF_DATE) {
-
+  
   if (!is.data.frame(px) || nrow(px) == 0) return(tibble())
   if (is.na(ticker) || ticker == "" || is.na(tweet_ts_et)) return(tibble())
-
+  
   side <- tolower(side %||% "long")
   is_short <- identical(side, "short")
-
+  
   if (is.null(as_of_date) || is.na(as_of_date)) {
     as_of_date <- max(px$date, na.rm = TRUE)
   }
-
+  
   as_of_date <- as.Date(as_of_date)
-
+  
   px_full <- px %>%
     filter(date <= as_of_date) %>%
     arrange(date) %>%
@@ -753,160 +813,160 @@ simulate_trade <- function(ticker,
       sma_val = zoo::rollmean(close, k = sma_len, fill = NA_real_, align = "right")
     ) %>%
     filter(!is.na(date), !is.na(close), !is.na(open), !is.na(high), !is.na(low))
-
+  
   if (nrow(px_full) < sma_len) return(tibble())
   if (max(px_full$date, na.rm = TRUE) < as.Date(tweet_ts_et)) return(tibble())
-
+  
   data_through_date <- max(px_full$date, na.rm = TRUE)
-
+  
   entry_pick <- pick_entry_from_px(px_full, tweet_ts_et)
   entry_date <- entry_pick$entry_date
   entry_at <- entry_pick$entry_at
-
+  
   if (is.na(entry_date)) return(tibble())
-
+  
   entry_row <- px_full %>%
     filter(date == entry_date) %>%
     slice_head(n = 1)
-
+  
   if (nrow(entry_row) == 0) return(tibble())
-
+  
   entry_idx <- match(entry_date, px_full$date)
-
+  
   rows_before_entry <- sum(px_full$date <= entry_date)
   non_na_closes_before_entry <- sum(!is.na(px_full$close[px_full$date <= entry_date]))
-
+  
   entry_price <- if (entry_at == "open") entry_row$open[[1]] else entry_row$close[[1]]
   entry_sma <- entry_row$sma_val[[1]]
-
+  
   if (is.na(entry_sma)) {
     last_n <- px_full %>%
       filter(date <= entry_date) %>%
       slice_tail(n = sma_len)
-
+    
     if (nrow(last_n) == sma_len && all(!is.na(last_n$close))) {
       entry_sma <- mean(last_n$close)
     }
   }
-
+  
   entry_below_sma10 <- if (!is.na(entry_sma)) {
     entry_price < entry_sma
   } else {
     NA
   }
-
+  
   # ------------------------------------------------------------------
   # Features known before/at entry
   # ------------------------------------------------------------------
-
+  
   sma10_prior <- if (!is.na(entry_idx) && entry_idx > 10) {
     mean(px_full$close[(entry_idx - 10):(entry_idx - 1)], na.rm = TRUE)
   } else {
     NA_real_
   }
-
+  
   dist_sma10 <- if (!is.na(sma10_prior) && sma10_prior > 0) {
     entry_price / sma10_prior - 1
   } else {
     NA_real_
   }
-
+  
   ret_5d_prior <- if (!is.na(entry_idx) && entry_idx > 6) {
     px_full$close[[entry_idx - 1]] / px_full$close[[entry_idx - 6]] - 1
   } else {
     NA_real_
   }
-
+  
   ret_20d_prior <- if (!is.na(entry_idx) && entry_idx > 21) {
     px_full$close[[entry_idx - 1]] / px_full$close[[entry_idx - 21]] - 1
   } else {
     NA_real_
   }
-
+  
   daily_ret <- px_full$close / dplyr::lag(px_full$close) - 1
-
+  
   enough_20d_history <- FALSE
   volatility_20d <- NA_real_
-
+  
   if (!is.na(entry_idx) && entry_idx > 21) {
     prior_20_returns <- daily_ret[(entry_idx - 20):(entry_idx - 1)]
     enough_20d_history <- length(prior_20_returns) == 20 && sum(!is.na(prior_20_returns)) >= 19
-
+    
     if (enough_20d_history) {
       volatility_20d <- sd(prior_20_returns, na.rm = TRUE)
     }
   }
-
+  
   volatility_20d_ann <- if (!is.na(volatility_20d)) {
     volatility_20d * sqrt(252)
   } else {
     NA_real_
   }
-
+  
   prev_close <- if (!is.na(entry_idx) && entry_idx > 1) {
     px_full$close[[entry_idx - 1]]
   } else {
     NA_real_
   }
-
+  
   gap_from_prev_close <- if (entry_at == "open" && !is.na(prev_close) && prev_close > 0) {
     entry_price / prev_close - 1
   } else {
     NA_real_
   }
-
+  
   directional_ret_5d <- if (is_short) -ret_5d_prior else ret_5d_prior
   directional_ret_20d <- if (is_short) -ret_20d_prior else ret_20d_prior
   directional_dist_sma10 <- if (is_short) -dist_sma10 else dist_sma10
-
+  
   # ------------------------------------------------------------------
   # Exit logic
   # ------------------------------------------------------------------
-
+  
   px_scan <- px_full %>%
     filter(date >= (as.Date(tweet_ts_et) - days(lookback)))
-
+  
   raw_lockup_d <- entry_date + days(lockup)
-
+  
   lockup_exit_row <- px_full %>%
     filter(date >= raw_lockup_d) %>%
     slice_head(n = 1)
-
+  
   lockup_exit_d <- if (nrow(lockup_exit_row) > 0) {
     lockup_exit_row$date[[1]]
   } else {
     raw_lockup_d
   }
-
+  
   tgt_px <- if (is_short) entry_price * (1 - target_pct) else entry_price * (1 + target_pct)
   stop_px <- if (is_short) entry_price * (1 + stop_pct) else entry_price * (1 - stop_pct)
-
+  
   scan_start <- if (entry_at == "close") entry_date + days(1) else entry_date
-
+  
   daily <- px_scan %>%
     filter(date >= scan_start, date <= lockup_exit_d) %>%
     mutate(
       take_hit = if (is_short) low <= tgt_px else high >= tgt_px,
       stop_hit = if (is_short) high >= stop_px else low <= stop_px
     )
-
+  
   first_event <- daily %>%
     filter(take_hit | stop_hit) %>%
     slice_head(n = 1)
-
+  
   part_exit <- FALSE
   stop_exit <- FALSE
   completed <- TRUE
   trade_status <- "completed"
   completion_reason <- NA_character_
   exit_reason <- NA_character_
-
+  
   mtm_row <- px_full %>% slice_tail(n = 1)
   mtm_date <- mtm_row$date[[1]]
   mtm_price <- mtm_row$close[[1]]
-
+  
   if (nrow(first_event) == 0) {
-
+    
     if (data_through_date < lockup_exit_d) {
       part_exit <- FALSE
       stop_exit <- FALSE
@@ -914,12 +974,12 @@ simulate_trade <- function(ticker,
       trade_status <- "open_no_exit_yet"
       completion_reason <- "within_lockup_no_exit_yet"
       exit_reason <- "open_no_exit_yet"
-
+      
       first_exit_d <- as.Date(NA)
       first_exit_px <- NA_real_
       final_exit_d <- mtm_date
       final_exit_px <- mtm_price
-
+      
     } else {
       part_exit <- FALSE
       stop_exit <- FALSE
@@ -927,43 +987,43 @@ simulate_trade <- function(ticker,
       trade_status <- "completed"
       completion_reason <- "time_exit_lockup"
       exit_reason <- "time_exit_lockup"
-
+      
       day_row <- px_full %>%
         filter(date == lockup_exit_d) %>%
         slice_head(n = 1)
-
+      
       if (nrow(day_row) == 0) day_row <- px_full %>% slice_tail(n = 1)
-
+      
       first_exit_d <- day_row$date[[1]]
       first_exit_px <- day_row$close[[1]]
       final_exit_d <- first_exit_d
       final_exit_px <- first_exit_px
     }
-
+    
   } else if (isTRUE(first_event$stop_hit[[1]])) {
-
+    
     part_exit <- FALSE
     stop_exit <- TRUE
     completed <- TRUE
     trade_status <- "completed"
     completion_reason <- "stop_first"
     exit_reason <- "stop_first"
-
+    
     first_exit_d <- first_event$date[[1]]
     first_exit_px <- stop_px
     final_exit_d <- first_exit_d
     final_exit_px <- first_exit_px
-
+    
   } else {
-
+    
     part_exit <- TRUE
     stop_exit <- FALSE
-
+    
     first_exit_d <- first_event$date[[1]]
     first_exit_px <- tgt_px
-
+    
     post_target_px <- px_full %>% filter(date > first_exit_d)
-
+    
     if (nrow(post_target_px) == 0) {
       completed <- FALSE
       trade_status <- "open_runner"
@@ -971,14 +1031,14 @@ simulate_trade <- function(ticker,
       exit_reason <- "open_runner"
       final_exit_d <- mtm_date
       final_exit_px <- mtm_price
-
+      
     } else if (!is_short) {
-
+      
       if (!isTRUE(entry_below_sma10)) {
         trail_exit <- post_target_px %>%
           filter(close < sma_val) %>%
           slice_head(n = 1)
-
+        
         if (nrow(trail_exit) > 0) {
           completed <- TRUE
           trade_status <- "completed"
@@ -994,20 +1054,20 @@ simulate_trade <- function(ticker,
           final_exit_d <- mtm_date
           final_exit_px <- mtm_price
         }
-
+        
       } else {
         armed_rows <- post_target_px %>%
           mutate(above_sma = close > sma_val)
-
+        
         first_reclaim <- armed_rows %>%
           filter(above_sma) %>%
           slice_head(n = 1)
-
+        
         pre_reclaim_stop <- armed_rows %>%
           { if (nrow(first_reclaim) > 0) filter(., date <= first_reclaim$date[[1]]) else . } %>%
           filter(low <= stop_px) %>%
           slice_head(n = 1)
-
+        
         if (nrow(pre_reclaim_stop) > 0) {
           completed <- TRUE
           trade_status <- "completed"
@@ -1015,7 +1075,7 @@ simulate_trade <- function(ticker,
           exit_reason <- "pre_reclaim_stop"
           final_exit_d <- pre_reclaim_stop$date[[1]]
           final_exit_px <- stop_px
-
+          
         } else if (nrow(first_reclaim) == 0) {
           completed <- FALSE
           trade_status <- "open_runner"
@@ -1023,12 +1083,12 @@ simulate_trade <- function(ticker,
           exit_reason <- "open_runner"
           final_exit_d <- mtm_date
           final_exit_px <- mtm_price
-
+          
         } else {
           trail_exit <- armed_rows %>%
             filter(date > first_reclaim$date[[1]], close < sma_val) %>%
             slice_head(n = 1)
-
+          
           if (nrow(trail_exit) > 0) {
             completed <- TRUE
             trade_status <- "completed"
@@ -1046,14 +1106,14 @@ simulate_trade <- function(ticker,
           }
         }
       }
-
+      
     } else {
-
+      
       if (isTRUE(entry_below_sma10)) {
         trail_exit <- post_target_px %>%
           filter(close > sma_val) %>%
           slice_head(n = 1)
-
+        
         if (nrow(trail_exit) > 0) {
           completed <- TRUE
           trade_status <- "completed"
@@ -1069,20 +1129,20 @@ simulate_trade <- function(ticker,
           final_exit_d <- mtm_date
           final_exit_px <- mtm_price
         }
-
+        
       } else {
         armed_rows <- post_target_px %>%
           mutate(below_sma = close < sma_val)
-
+        
         first_reclaim <- armed_rows %>%
           filter(below_sma) %>%
           slice_head(n = 1)
-
+        
         pre_reclaim_stop <- armed_rows %>%
           { if (nrow(first_reclaim) > 0) filter(., date <= first_reclaim$date[[1]]) else . } %>%
           filter(high >= stop_px) %>%
           slice_head(n = 1)
-
+        
         if (nrow(pre_reclaim_stop) > 0) {
           completed <- TRUE
           trade_status <- "completed"
@@ -1090,7 +1150,7 @@ simulate_trade <- function(ticker,
           exit_reason <- "pre_reclaim_stop"
           final_exit_d <- pre_reclaim_stop$date[[1]]
           final_exit_px <- stop_px
-
+          
         } else if (nrow(first_reclaim) == 0) {
           completed <- FALSE
           trade_status <- "open_runner"
@@ -1098,12 +1158,12 @@ simulate_trade <- function(ticker,
           exit_reason <- "open_runner"
           final_exit_d <- mtm_date
           final_exit_px <- mtm_price
-
+          
         } else {
           trail_exit <- armed_rows %>%
             filter(date > first_reclaim$date[[1]], close > sma_val) %>%
             slice_head(n = 1)
-
+          
           if (nrow(trail_exit) > 0) {
             completed <- TRUE
             trade_status <- "completed"
@@ -1123,7 +1183,7 @@ simulate_trade <- function(ticker,
       }
     }
   }
-
+  
   final_return <- if (part_exit) {
     if (is_short) {
       (2 / 3) * ((entry_price - first_exit_px) / entry_price) +
@@ -1139,7 +1199,7 @@ simulate_trade <- function(ticker,
       (final_exit_px - entry_price) / entry_price
     }
   }
-
+  
   tibble(
     ticker = ticker,
     tweet_ts_et = tweet_ts_et,
@@ -1150,7 +1210,7 @@ simulate_trade <- function(ticker,
     entry_sma = entry_sma,
     has_entry_sma = !is.na(entry_sma),
     entry_below_sma10 = entry_below_sma10,
-
+    
     sma10_prior = sma10_prior,
     dist_sma10 = dist_sma10,
     ret_5d_prior = ret_5d_prior,
@@ -1162,26 +1222,26 @@ simulate_trade <- function(ticker,
     directional_ret_5d = directional_ret_5d,
     directional_ret_20d = directional_ret_20d,
     directional_dist_sma10 = directional_dist_sma10,
-
+    
     rows_before_entry = rows_before_entry,
     non_na_closes_before_entry = non_na_closes_before_entry,
     px_start = safe_min_date(px_full$date),
     px_end = safe_max_date(px_full$date),
-
+    
     first_exit_date = first_exit_d,
     first_exit_price = first_exit_px,
     final_exit_date = final_exit_d,
     final_exit_price = final_exit_px,
     data_through_date = data_through_date,
     holding_days = as.integer(final_exit_d - entry_date),
-
+    
     part_exit = part_exit,
     stop_exit = stop_exit,
     exit_reason = exit_reason,
     completed = completed,
     trade_status = trade_status,
     completion_reason = completion_reason,
-
+    
     target_pct = target_pct,
     stop_pct = stop_pct,
     total_return = final_return
@@ -1196,14 +1256,14 @@ simulate_trade_full <- function(row,
                                 stop_pct = STOP_PCT,
                                 cache_dir = CACHE_DIR,
                                 as_of_date = AS_OF_DATE) {
-
+  
   px <- get_px_cached(
     sym = row$ticker[[1]],
     from = as.Date(row$tweet_ts_et[[1]]) - days(250),
     to = as_of_date,
     cache_dir = cache_dir
   )
-
+  
   out <- simulate_trade(
     ticker = row$ticker[[1]],
     tweet_ts_et = row$tweet_ts_et[[1]],
@@ -1216,11 +1276,11 @@ simulate_trade_full <- function(row,
     stop_pct = stop_pct,
     as_of_date = as_of_date
   )
-
+  
   if (nrow(out) == 0) return(tibble())
-
+  
   bind_cols(
-    row %>% select(-processing_key),
+    row %>% select(-signal_key),
     out %>% select(-ticker, -side, -tweet_ts_et)
   ) %>%
     mutate(win = total_return > 0)
@@ -1236,7 +1296,7 @@ results <- purrr::map_dfr(
   seq_len(nrow(signals_run)),
   function(i) {
     row_i <- signals_run[i, , drop = FALSE]
-
+    
     message(sprintf(
       "[%d/%d] Processing: %s | %s",
       i,
@@ -1244,7 +1304,7 @@ results <- purrr::map_dfr(
       row_i$username[[1]],
       row_i$ticker[[1]]
     ))
-
+    
     tryCatch(
       simulate_trade_full(
         row = row_i,
@@ -1275,9 +1335,9 @@ add_spy_regime <- function(results_tbl,
                            spy_symbol = "SPY",
                            spy_from = as.Date("2009-01-01"),
                            use_previous_day = TRUE) {
-
+  
   if (!is.data.frame(results_tbl) || nrow(results_tbl) == 0) return(results_tbl)
-
+  
   results_tbl <- results_tbl %>%
     mutate(
       tweet_ts_et = as.POSIXct(tweet_ts_et, tz = "America/New_York"),
@@ -1296,9 +1356,9 @@ add_spy_regime <- function(results_tbl,
       "market_regime_50",
       "market_regime_200"
     )))
-
+  
   spy_to <- max(results_tbl$data_through_date, na.rm = TRUE)
-
+  
   spy_px <- get_px_cached(
     sym = spy_symbol,
     from = spy_from,
@@ -1306,12 +1366,12 @@ add_spy_regime <- function(results_tbl,
     cache_dir = cache_dir,
     fetch_fn = get_px_via_syscurl_yahoo
   )
-
+  
   if (nrow(spy_px) == 0 || !"date" %in% names(spy_px)) {
     message("No SPY price data available; returning results without regime columns.")
     return(results_tbl)
   }
-
+  
   spy_regime <- spy_px %>%
     arrange(date) %>%
     mutate(
@@ -1338,7 +1398,7 @@ add_spy_regime <- function(results_tbl,
       market_regime_50,
       market_regime_200
     )
-
+  
   if (use_previous_day) {
     results_tbl %>%
       arrange(entry_date) %>%
@@ -1366,7 +1426,7 @@ results <- add_spy_regime(
 
 cat("Rows after SPY regime:", nrow(results), "\n")
 
-cat("Volatility coverage:\n")
+cat("Volatility coverage in this run:\n")
 print(
   results %>%
     summarise(
@@ -1484,8 +1544,6 @@ print(
 # 11 · Upload / upsert ----------------------------------------------------------
 ###############################################################################
 
-qid <- function(x) as.character(DBI::dbQuoteIdentifier(con, x))
-
 target_tbl <- DBI::Id(schema = "public", table = TARGET_TABLE_NAME)
 target_tbl_q <- as.character(DBI::dbQuoteIdentifier(con, target_tbl))
 
@@ -1501,11 +1559,11 @@ sql_type_for_vector <- function(x) {
 ensure_missing_columns <- function(con, target_tbl, data) {
   target_tbl_q <- as.character(DBI::dbQuoteIdentifier(con, target_tbl))
   existing_cols <- DBI::dbListFields(con, target_tbl)
-
+  
   missing_cols <- setdiff(names(data), existing_cols)
-
+  
   if (length(missing_cols) == 0) return(invisible(TRUE))
-
+  
   for (col in missing_cols) {
     sql_type <- sql_type_for_vector(data[[col]])
     sql <- sprintf(
@@ -1514,17 +1572,17 @@ ensure_missing_columns <- function(con, target_tbl, data) {
       qid(col),
       sql_type
     )
-
+    
     message("Adding missing column to target table: ", col, " ", sql_type)
     DBI::dbExecute(con, sql)
   }
-
+  
   invisible(TRUE)
 }
 
 create_target_indexes <- function(con, table_name) {
   safe_idx_base <- gsub("[^A-Za-z0-9_]", "_", table_name)
-
+  
   DBI::dbExecute(
     con,
     sprintf(
@@ -1533,7 +1591,7 @@ create_target_indexes <- function(con, table_name) {
       table_name
     )
   )
-
+  
   DBI::dbExecute(
     con,
     sprintf(
@@ -1542,7 +1600,7 @@ create_target_indexes <- function(con, table_name) {
       table_name
     )
   )
-
+  
   DBI::dbExecute(
     con,
     sprintf(
@@ -1551,7 +1609,7 @@ create_target_indexes <- function(con, table_name) {
       table_name
     )
   )
-
+  
   DBI::dbExecute(
     con,
     sprintf(
@@ -1560,7 +1618,7 @@ create_target_indexes <- function(con, table_name) {
       table_name
     )
   )
-
+  
   if ("signal_id" %in% names(results_upload)) {
     DBI::dbExecute(
       con,
@@ -1574,9 +1632,9 @@ create_target_indexes <- function(con, table_name) {
 }
 
 if (!DBI::dbExistsTable(con, target_tbl)) {
-
+  
   message("Creating new table: public.", TARGET_TABLE_NAME)
-
+  
   DBI::dbWriteTable(
     con,
     target_tbl,
@@ -1584,20 +1642,20 @@ if (!DBI::dbExistsTable(con, target_tbl)) {
     overwrite = FALSE,
     row.names = FALSE
   )
-
+  
   create_target_indexes(con, TARGET_TABLE_NAME)
-
+  
 } else {
-
+  
   message("Table already exists. Upserting into: public.", TARGET_TABLE_NAME)
-
+  
   ensure_missing_columns(con, target_tbl, results_upload)
   create_target_indexes(con, TARGET_TABLE_NAME)
-
+  
   temp_name <- paste0("tmp_", TARGET_TABLE_NAME, "_", format(Sys.time(), "%Y%m%d%H%M%S"))
   temp_tbl <- DBI::Id(table = temp_name)
   temp_tbl_q <- as.character(DBI::dbQuoteIdentifier(con, temp_tbl))
-
+  
   DBI::dbWriteTable(
     con,
     temp_tbl,
@@ -1606,12 +1664,12 @@ if (!DBI::dbExistsTable(con, target_tbl)) {
     overwrite = TRUE,
     row.names = FALSE
   )
-
+  
   target_cols <- DBI::dbListFields(con, target_tbl)
   cols <- intersect(names(results_upload), target_cols)
-
+  
   update_cols <- setdiff(cols, "trade_id")
-
+  
   update_set <- paste(
     vapply(
       update_cols,
@@ -1620,9 +1678,9 @@ if (!DBI::dbExistsTable(con, target_tbl)) {
     ),
     collapse = ", "
   )
-
+  
   col_list <- paste(vapply(cols, qid, character(1)), collapse = ", ")
-
+  
   upsert_sql <- sprintf(
     "
     INSERT INTO %s (%s)
@@ -1637,7 +1695,7 @@ if (!DBI::dbExistsTable(con, target_tbl)) {
     temp_tbl_q,
     update_set
   )
-
+  
   DBI::dbExecute(con, upsert_sql)
 }
 
@@ -1671,6 +1729,26 @@ print(
         MAX(loaded_at) AS latest_loaded_at
       FROM public.%s
       WHERE strategy_label = %s;
+      ",
+      TARGET_TABLE_NAME,
+      as.character(DBI::dbQuoteString(con, STRATEGY_LABEL))
+    )
+  )
+)
+
+print(
+  DBI::dbGetQuery(
+    con,
+    sprintf(
+      "
+      SELECT
+        trade_status,
+        completed,
+        COUNT(*) AS n_rows
+      FROM public.%s
+      WHERE strategy_label = %s
+      GROUP BY trade_status, completed
+      ORDER BY n_rows DESC;
       ",
       TARGET_TABLE_NAME,
       as.character(DBI::dbQuoteString(con, STRATEGY_LABEL))
