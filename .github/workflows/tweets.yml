@@ -21,7 +21,7 @@ on:
       new_signal_lookback_days:
         description: "Only process new signals from the last N days. Open trades are refreshed regardless of age."
         required: false
-        default: "31"
+        default: "30"
 
   schedule:
     # 9:00 AM New York during EST
@@ -53,7 +53,7 @@ jobs:
       X_BEARER: ${{ secrets.X_BEARER }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      # Backtest tables
+      # Tables
       SIGNALS_TABLE: "twitter_trade_signals"
       BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy"
 
@@ -68,17 +68,17 @@ jobs:
       # Yahoo cache
       CACHE_DIR: "cache_px_tp10_sl5"
 
-      # Important: keep Yahoo logs quiet during scheduled runs
+      # Keep Yahoo logs quiet during normal runs
       DEBUG_YAHOO: "false"
 
-      # Normal production behavior:
-      # - false = only new recent signals + open trades
-      # - true = rerun everything
+      # Production behavior:
+      # false = only new recent signals + open/uncompleted trades
+      # true = rerun every valid signal
       FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
 
       # Only new signals within this window are processed.
-      # Open/uncompleted trades are still refreshed regardless of age.
-      NEW_SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.new_signal_lookback_days || '31' }}
+      # Open/uncompleted trades are refreshed regardless of age.
+      NEW_SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.new_signal_lookback_days || '30' }}
 
       # Optional manual controls
       MAX_ROWS_LOCAL: ${{ github.event.inputs.max_rows || 'Inf' }}
@@ -145,6 +145,15 @@ jobs:
           else
             echo "generate_tweet_signals.R not found, skipping signal generation."
           fi
+
+      - name: Debug refresh file contents
+        run: |
+          echo "Checking for problematic Yahoo curl headers..."
+          grep -n "application/json\|Accept:" refresh_backtest_results.R || true
+          echo "Checking Yahoo fetch function definition..."
+          grep -n "fetch_yahoo_chart_syscurl" refresh_backtest_results.R || true
+          echo "Checking production selection logic..."
+          grep -n "NEW_SIGNAL_LOOKBACK_DAYS\|new_recent_signals\|open_signals" refresh_backtest_results.R || true
 
       - name: Refresh backtest results
         run: Rscript refresh_backtest_results.R
