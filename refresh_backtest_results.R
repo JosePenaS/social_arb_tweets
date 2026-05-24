@@ -63,8 +63,7 @@ CACHE_DIR <- Sys.getenv("CACHE_DIR", "cache_px_tp10_sl5")
 
 DEBUG_YAHOO <- env_bool("DEBUG_YAHOO", FALSE)
 
-# Normally FALSE.
-# If TRUE, reruns every valid signal.
+# Normally false. If true, reruns all valid signals.
 FORCE_REBUILD <- env_bool("FORCE_REBUILD", FALSE)
 
 # Only new signals from this many days back are processed.
@@ -249,7 +248,7 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
   if (!nzchar(curl_bin)) stop("curl not found on system")
   
   # IMPORTANT:
-  # Do NOT add Accept/application-json headers here.
+  # Do not add an Accept/application-json header here.
   # In GitHub Actions, the old header caused:
   # curl: (6) Could not resolve host: application
   args <- c(
@@ -258,8 +257,8 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
     "-sS",
     "-L",
     "--compressed",
-    "-A", "Mozilla/5.0",
-    "-o", dest_json,
+    "--user-agent", "Mozilla/5.0",
+    "--output", dest_json,
     url
   )
   
@@ -323,30 +322,50 @@ fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, deb
   FALSE
 }
 
+
+empty_px_tbl <- function() {
+  tibble(
+    date = as.Date(character()),
+    open = numeric(),
+    high = numeric(),
+    low = numeric(),
+    close = numeric(),
+    volume = numeric()
+  )
+}
+
 read_yahoo_chart_json <- function(path) {
-  if (!file.exists(path)) return(tibble())
+  if (!file.exists(path)) return(empty_px_tbl())
   
   txt <- tryCatch(
     paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n"),
     error = function(e) ""
   )
   
-  if (!nzchar(txt)) return(tibble())
+  if (!nzchar(txt)) return(empty_px_tbl())
   
-  js <- tryCatch(jsonlite::fromJSON(txt, simplifyVector = FALSE), error = function(e) NULL)
+  js <- tryCatch(
+    jsonlite::fromJSON(txt, simplifyVector = FALSE),
+    error = function(e) NULL
+  )
   
   if (is.null(js) || is.null(js$chart) || !is.null(js$chart$error)) {
-    return(tibble())
+    return(empty_px_tbl())
   }
   
   res <- js$chart$result
-  if (is.null(res) || length(res) == 0) return(tibble())
+  
+  if (is.null(res) || length(res) == 0 || is.null(res[[1]])) {
+    return(empty_px_tbl())
+  }
   
   res1 <- res[[1]]
   timestamps <- res1$timestamp
   quote_obj <- res1$indicators$quote[[1]]
   
-  if (is.null(timestamps) || is.null(quote_obj)) return(tibble())
+  if (is.null(timestamps) || is.null(quote_obj)) {
+    return(empty_px_tbl())
+  }
   
   ts_vec <- unlist(timestamps)
   open_vec <- unlist(quote_obj$open)
@@ -364,7 +383,7 @@ read_yahoo_chart_json <- function(path) {
     length(vol_vec)
   )
   
-  if (min_len == 0) return(tibble())
+  if (min_len == 0) return(empty_px_tbl())
   
   tibble(
     date = as.Date(as.POSIXct(ts_vec[seq_len(min_len)], origin = "1970-01-01", tz = "UTC")),
@@ -378,6 +397,7 @@ read_yahoo_chart_json <- function(path) {
     arrange(date)
 }
 
+
 get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
   tmp_json <- tempfile(fileext = ".json")
   
@@ -389,12 +409,39 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
     debug = debug
   )
   
-  if (!ok) return(tibble())
+  if (!ok) {
+    return(empty_px_tbl())
+  }
   
-  read_yahoo_chart_json(tmp_json) %>%
-    filter(date >= as.Date(from), date <= as.Date(to)) %>%
+  px <- read_yahoo_chart_json(tmp_json)
+  
+  if (
+    !is.data.frame(px) ||
+    nrow(px) == 0 ||
+    !"date" %in% names(px)
+  ) {
+    if (debug) {
+      cat("Yahoo parsed result was empty or missing date column for:", sym, "\n")
+      if (file.exists(tmp_json)) {
+        txt <- paste(readLines(tmp_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+        cat("Raw Yahoo response first 500 chars:\n")
+        cat(substr(txt, 1, 500), "\n")
+      }
+    }
+    
+    return(empty_px_tbl())
+  }
+  
+  px %>%
+    mutate(date = as.Date(date)) %>%
+    filter(
+      !is.na(date),
+      date >= as.Date(from),
+      date <= as.Date(to)
+    ) %>%
     arrange(date)
 }
+
 
 get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_px_via_syscurl_yahoo) {
   if (is.na(from) || is.na(to) || !nzchar(sym)) return(tibble())
@@ -449,7 +496,7 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
           fetch_fn(sym = sym, from = fr, to = tr),
           error = function(e) {
             message(sprintf("Fetch failed for %s [%s to %s]: %s", sym, fr, tr, e$message))
-            tibble()
+            empty_px_tbl()
           }
         )
         
@@ -718,8 +765,8 @@ if (FORCE_REBUILD) {
     semi_join(open_keys, by = "signal_key")
   
   signals_run <- bind_rows(
-    open_signals,
-    new_recent_signals
+    new_recent_signals,
+    open_signals
   ) %>%
     distinct(signal_key, .keep_all = TRUE)
   
@@ -1777,7 +1824,6 @@ print(
 )
 
 cat("refresh_backtest_results.R completed successfully.\n")
-
 
 
 
