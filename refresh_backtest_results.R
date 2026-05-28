@@ -1826,5 +1826,4 @@ print(
 cat("refresh_backtest_results.R completed successfully.\n")
 
 
-
     
