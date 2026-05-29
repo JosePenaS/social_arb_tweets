@@ -101,8 +101,39 @@ x_lookup_user_ids <- function(usernames, bearer) {
   )
 }
 
-accounts <- x_lookup_user_ids(handles, BEARER)
-if (nrow(accounts) == 0) stop("No accounts returned from lookup")
+lookup_user_ids_with_retry <- function(handles, bearer, max_tries = 5) {
+  last_error <- NULL
+  
+  for (attempt in seq_len(max_tries)) {
+    message("🔎 Looking up X user IDs. Attempt ", attempt, " of ", max_tries)
+    
+    out <- tryCatch(
+      x_lookup_user_ids(handles, bearer),
+      error = function(e) {
+        last_error <<- e
+        NULL
+      }
+    )
+    
+    if (!is.null(out) && nrow(out) > 0) {
+      message("✅ User lookup succeeded.")
+      return(out)
+    }
+    
+    wait_seconds <- min(90, 10 * attempt)
+    message("⚠️ User lookup failed. Waiting ", wait_seconds, " seconds before retrying...")
+    Sys.sleep(wait_seconds)
+  }
+  
+  last_msg <- if (!is.null(last_error)) conditionMessage(last_error) else "unknown error"
+  stop("User lookup failed after ", max_tries, " attempts. Last error: ", last_msg)
+}
+
+accounts <- lookup_user_ids_with_retry(handles, BEARER)
+
+if (nrow(accounts) == 0) {
+  stop("No accounts returned from lookup")
+}
 
 # ── 2) FETCH TWEETS IN WINDOW (PAGINATED) ────────────────────────────────────
 x_get_user_tweets_window <- function(user_id, bearer, start_time, end_time,
