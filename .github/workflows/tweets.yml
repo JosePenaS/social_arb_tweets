@@ -9,7 +9,12 @@ on:
         default: "false"
 
       max_rows:
-        description: "Max rows to process. Use Inf for all selected rows."
+        description: "Max rows to process in backtest. Use Inf for all selected rows."
+        required: false
+        default: "Inf"
+
+      max_feature_rows:
+        description: "Max rows to process in feature refresh. Use Inf for all selected rows."
         required: false
         default: "Inf"
 
@@ -20,6 +25,11 @@ on:
 
       new_signal_lookback_days:
         description: "Only process new signals from the last N days. Open trades are refreshed regardless of age."
+        required: false
+        default: "30"
+
+      feature_lookback_days:
+        description: "Refresh features for missing rows and signals from the last N days."
         required: false
         default: "30"
 
@@ -55,6 +65,7 @@ jobs:
 
       # Tables
       SIGNALS_TABLE: "twitter_trade_signals"
+      FEATURES_TABLE: "twitter_trade_signal_features"
       BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy"
 
       # Strategy settings
@@ -65,7 +76,7 @@ jobs:
       LOCKUP_DAYS: "30"
       SMA_LEN: "10"
 
-      # Yahoo cache
+      # Yahoo cache for backtest script
       CACHE_DIR: "cache_px_tp10_sl5"
 
       # Keep Yahoo logs quiet during normal runs
@@ -76,9 +87,15 @@ jobs:
       # true = rerun every valid signal
       FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
 
-      # Only new signals within this window are processed.
+      # Only new signals within this window are processed by backtest.
       # Open/uncompleted trades are refreshed regardless of age.
       NEW_SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.new_signal_lookback_days || '30' }}
+
+      # Feature refresh:
+      # processes rows missing features + recent signals within this window
+      FEATURE_LOOKBACK_DAYS: ${{ github.event.inputs.feature_lookback_days || '30' }}
+      MAX_FEATURE_ROWS: ${{ github.event.inputs.max_feature_rows || 'Inf' }}
+      MAX_FEATURE_LAG_DAYS: "7"
 
       # Optional manual controls
       MAX_ROWS_LOCAL: ${{ github.event.inputs.max_rows || 'Inf' }}
@@ -150,6 +167,7 @@ jobs:
             yahoo-price-cache-tp10-sl5-${{ runner.os }}-
 
       - name: Scrape tweets
+        continue-on-error: true
         run: |
           if [ -f "twitter_ingest.R" ]; then
             Rscript twitter_ingest.R
@@ -165,6 +183,14 @@ jobs:
             echo "generate_tweet_signals.R not found, skipping signal generation."
           fi
 
+      - name: Refresh trade signal features
+        run: |
+          if [ -f "refresh_trade_signal_features.R" ]; then
+            Rscript refresh_trade_signal_features.R
+          else
+            echo "refresh_trade_signal_features.R not found, skipping feature refresh."
+          fi
+
       - name: Debug refresh file contents
         run: |
           echo "Checking for problematic Yahoo curl headers..."
@@ -173,6 +199,8 @@ jobs:
           grep -n "fetch_yahoo_chart_syscurl" refresh_backtest_results.R || true
           echo "Checking production selection logic..."
           grep -n "NEW_SIGNAL_LOOKBACK_DAYS\|new_recent_signals\|open_signals" refresh_backtest_results.R || true
+          echo "Checking feature refresh file..."
+          grep -n "RUNNING FILE: refresh_trade_signal_features" refresh_trade_signal_features.R || true
 
       - name: Refresh backtest results
         run: Rscript refresh_backtest_results.R
