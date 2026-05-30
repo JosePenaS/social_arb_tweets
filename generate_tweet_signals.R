@@ -108,27 +108,39 @@ DBI::dbExecute(
   )
 )
 
+###############################################################################
+# Create indexes safely --------------------------------------------------------
+###############################################################################
+
+target_tbl <- DBI::Id(schema = "public", table = SIGNALS_TABLE)
+target_q <- as.character(DBI::dbQuoteIdentifier(con, target_tbl))
+
+safe_idx_base <- gsub("[^A-Za-z0-9_]", "_", SIGNALS_TABLE)
+
 DBI::dbExecute(
   con,
-  glue::glue_sql(
-    "CREATE INDEX IF NOT EXISTS idx_{`SIGNALS_TABLE`}_created_at ON public.{`SIGNALS_TABLE`}(created_at);",
-    .con = con
+  sprintf(
+    "CREATE INDEX IF NOT EXISTS %s ON %s(created_at);",
+    as.character(DBI::dbQuoteIdentifier(con, paste0("idx_", safe_idx_base, "_created_at"))),
+    target_q
   )
 )
 
 DBI::dbExecute(
   con,
-  glue::glue_sql(
-    "CREATE INDEX IF NOT EXISTS idx_{`SIGNALS_TABLE`}_ticker ON public.{`SIGNALS_TABLE`}(ticker);",
-    .con = con
+  sprintf(
+    "CREATE INDEX IF NOT EXISTS %s ON %s(ticker);",
+    as.character(DBI::dbQuoteIdentifier(con, paste0("idx_", safe_idx_base, "_ticker"))),
+    target_q
   )
 )
 
 DBI::dbExecute(
   con,
-  glue::glue_sql(
-    "CREATE INDEX IF NOT EXISTS idx_{`SIGNALS_TABLE`}_username ON public.{`SIGNALS_TABLE`}(username);",
-    .con = con
+  sprintf(
+    "CREATE INDEX IF NOT EXISTS %s ON %s(username);",
+    as.character(DBI::dbQuoteIdentifier(con, paste0("idx_", safe_idx_base, "_username"))),
+    target_q
   )
 )
 
