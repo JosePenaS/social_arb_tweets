@@ -229,97 +229,101 @@ build_signal_key <- function(signal_id, username, conversation_id, ticker, tweet
 # 3 · Yahoo fetch + cache -------------------------------------------------------
 ###############################################################################
 
-fetch_yahoo_chart_syscurl <- function(sym, from, to, dest_json, retries = 4, debug = DEBUG_YAHOO) {
-  if (is.na(from) || is.na(to) || !nzchar(sym)) return(FALSE)
+fetch_yahoo_chart_syscurl_text <- function(sym, from_date, to_date, retries = 6, debug = DEBUG_YAHOO) {
+  if (is.na(from_date) || is.na(to_date) || !nzchar(sym)) return(NULL)
   
   yahoo_sym <- normalize_symbol_for_yahoo(sym)
   
-  period1 <- date_to_unix(from, end_of_day = FALSE)
-  period2 <- date_to_unix(to, end_of_day = TRUE)
+  if (is.na(yahoo_sym) || !nzchar(yahoo_sym)) {
+    return(NULL)
+  }
+  
+  period1 <- date_to_unix(from_date, end_of_day = FALSE)
+  period2 <- date_to_unix(to_date, end_of_day = TRUE)
   
   url <- paste0(
-    "https://query2.finance.yahoo.com/v8/finance/chart/", yahoo_sym,
+    "https://query1.finance.yahoo.com/v8/finance/chart/",
+    URLencode(yahoo_sym, reserved = TRUE),
     "?period1=", period1,
     "&period2=", period2,
-    "&interval=1d&includeAdjustedClose=true"
+    "&interval=1d",
+    "&events=history",
+    "&includeAdjustedClose=true"
   )
   
   curl_bin <- Sys.which("curl")
-  if (!nzchar(curl_bin)) stop("curl not found on system")
   
-  # IMPORTANT:
-  # Do not add an Accept/application-json header here.
-  # In GitHub Actions, the old header caused:
-  # curl: (6) Could not resolve host: application
+  if (!nzchar(curl_bin)) {
+    stop("curl not found on system PATH")
+  }
+  
   args <- c(
     "--http1.1",
     "--ipv4",
-    "-sS",
     "-L",
     "--compressed",
+    "--silent",
+    "--show-error",
     "--user-agent", "Mozilla/5.0",
-    "--output", dest_json,
     url
   )
   
   for (k in seq_len(retries)) {
-    if (file.exists(dest_json)) unlink(dest_json)
+    err_file <- tempfile(fileext = ".txt")
     
     out <- tryCatch(
-      system2(curl_bin, args = args, stdout = TRUE, stderr = TRUE),
+      suppressWarnings(
+        system2(
+          curl_bin,
+          args = args,
+          stdout = TRUE,
+          stderr = err_file
+        )
+      ),
       error = function(e) e
     )
     
     status <- if (inherits(out, "error")) 1L else attr(out, "status")
     if (is.null(status)) status <- 0L
     
+    txt <- if (inherits(out, "error")) {
+      ""
+    } else {
+      paste(out, collapse = "")
+    }
+    
+    err_txt <- if (file.exists(err_file)) {
+      paste(readLines(err_file, warn = FALSE), collapse = "\n")
+    } else {
+      ""
+    }
+    
+    if (file.exists(err_file)) unlink(err_file)
+    
     if (debug) {
       cat("Attempt:", k, "\n")
+      cat("Ticker:", sym, "\n")
       cat("Yahoo symbol:", yahoo_sym, "\n")
       cat("URL:", url, "\n")
-      cat("Curl args:\n")
-      cat(paste(args, collapse = " "), "\n")
-      cat("period1:", period1, "=>", as.character(as.POSIXct(period1, origin = "1970-01-01", tz = "UTC")), "\n")
-      cat("period2:", period2, "=>", as.character(as.POSIXct(period2, origin = "1970-01-01", tz = "UTC")), "\n")
-      cat("period2 > period1:", period2 > period1, "\n")
       cat("Status:", status, "\n")
-      cat("File exists:", file.exists(dest_json), "\n")
-      if (file.exists(dest_json)) cat("File size:", file.info(dest_json)$size, "\n")
-      if (length(out) > 0) {
-        cat("curl output:\n")
-        cat(paste(out, collapse = "\n"), "\n")
-      }
+      cat("Response chars:", nchar(txt), "\n")
+      cat("Starts with:", substr(txt, 1, 200), "\n")
+      if (nzchar(err_txt)) cat("Curl stderr:", err_txt, "\n")
     }
     
     if (
       identical(as.integer(status), 0L) &&
-      file.exists(dest_json) &&
-      file.info(dest_json)$size > 0
+      nzchar(txt) &&
+      grepl('"chart"', txt, fixed = TRUE) &&
+      !grepl("Too Many Requests", txt, fixed = TRUE)
     ) {
-      txt <- paste(readLines(dest_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
-      
-      if (debug) {
-        cat("Yahoo response first 300 chars:\n")
-        cat(substr(txt, 1, 300), "\n")
-      }
-      
-      if (
-        grepl('"chart"', txt, fixed = TRUE) &&
-        !grepl("Too Many Requests", txt, fixed = TRUE)
-      ) {
-        return(TRUE)
-      }
-      
-      if (grepl("Too Many Requests", txt, fixed = TRUE)) {
-        Sys.sleep(min(2^k, 10))
-        next
-      }
+      return(txt)
     }
     
     Sys.sleep(min(2^k, 10))
   }
   
-  FALSE
+  NULL
 }
 
 
@@ -334,19 +338,16 @@ empty_px_tbl <- function() {
   )
 }
 
-read_yahoo_chart_json <- function(path) {
-  if (!file.exists(path)) return(empty_px_tbl())
-  
-  txt <- tryCatch(
-    paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n"),
-    error = function(e) ""
-  )
-  
-  if (!nzchar(txt)) return(empty_px_tbl())
+
+read_yahoo_chart_text <- function(txt) {
+  if (is.null(txt) || !nzchar(txt)) return(empty_px_tbl())
   
   js <- tryCatch(
     jsonlite::fromJSON(txt, simplifyVector = FALSE),
-    error = function(e) NULL
+    error = function(e) {
+      message("Could not parse Yahoo JSON: ", e$message)
+      NULL
+    }
   )
   
   if (is.null(js) || is.null(js$chart) || !is.null(js$chart$error)) {
@@ -393,58 +394,43 @@ read_yahoo_chart_json <- function(path) {
     close = suppressWarnings(as.numeric(close_vec[seq_len(min_len)])),
     volume = suppressWarnings(as.numeric(vol_vec[seq_len(min_len)]))
   ) %>%
-    filter(!is.na(date)) %>%
+    filter(!is.na(date), !is.na(close)) %>%
     arrange(date)
 }
 
 
 get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
-  tmp_json <- tempfile(fileext = ".json")
+  from <- as.Date(from)
+  to <- as.Date(to)
   
-  ok <- fetch_yahoo_chart_syscurl(
+  if (is.na(from) || is.na(to) || from > to || !nzchar(sym)) {
+    return(empty_px_tbl())
+  }
+  
+  txt <- fetch_yahoo_chart_syscurl_text(
     sym = sym,
-    from = from,
-    to = to,
-    dest_json = tmp_json,
+    from_date = from,
+    to_date = to,
     debug = debug
   )
   
-  if (!ok) {
+  if (is.null(txt)) {
+    message("Yahoo syscurl text fetch failed for ", sym)
     return(empty_px_tbl())
   }
   
-  px <- read_yahoo_chart_json(tmp_json)
-  
-  if (
-    !is.data.frame(px) ||
-    nrow(px) == 0 ||
-    !"date" %in% names(px)
-  ) {
-    if (debug) {
-      cat("Yahoo parsed result was empty or missing date column for:", sym, "\n")
-      if (file.exists(tmp_json)) {
-        txt <- paste(readLines(tmp_json, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
-        cat("Raw Yahoo response first 500 chars:\n")
-        cat(substr(txt, 1, 500), "\n")
-      }
-    }
-    
-    return(empty_px_tbl())
-  }
-  
-  px %>%
-    mutate(date = as.Date(date)) %>%
+  read_yahoo_chart_text(txt) %>%
     filter(
       !is.na(date),
-      date >= as.Date(from),
-      date <= as.Date(to)
+      date >= from,
+      date <= to
     ) %>%
     arrange(date)
 }
 
 
 get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_px_via_syscurl_yahoo) {
-  if (is.na(from) || is.na(to) || !nzchar(sym)) return(tibble())
+  if (is.na(from) || is.na(to) || !nzchar(sym)) return(empty_px_tbl())
   
   dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
   
@@ -452,13 +438,13 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
   fname <- file.path(cache_dir, paste0(safe_sym, ".rds"))
   
   cached <- if (file.exists(fname)) {
-    tryCatch(readRDS(fname), error = function(e) tibble())
+    tryCatch(readRDS(fname), error = function(e) empty_px_tbl())
   } else {
-    tibble()
+    empty_px_tbl()
   }
   
-  if (!is.data.frame(cached) || nrow(cached) == 0) {
-    cached <- tibble()
+  if (!is.data.frame(cached) || nrow(cached) == 0 || !"date" %in% names(cached)) {
+    cached <- empty_px_tbl()
   } else {
     cached <- cached %>%
       mutate(date = as.Date(date)) %>%
@@ -500,8 +486,10 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
           }
         )
         
-        if (nrow(fresh) > 0) {
+        if (is.data.frame(fresh) && nrow(fresh) > 0 && "date" %in% names(fresh)) {
           cached <- bind_rows(cached, fresh) %>%
+            mutate(date = as.Date(date)) %>%
+            filter(!is.na(date)) %>%
             distinct(date, .keep_all = TRUE) %>%
             arrange(date)
           
@@ -511,13 +499,19 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
     }
   }
   
-  if (nrow(cached) == 0) return(tibble())
+  if (nrow(cached) == 0 || !"date" %in% names(cached)) {
+    return(empty_px_tbl())
+  }
   
   cached %>%
-    filter(date >= need_from, date <= need_to) %>%
+    mutate(date = as.Date(date)) %>%
+    filter(
+      !is.na(date),
+      date >= need_from,
+      date <= need_to
+    ) %>%
     arrange(date)
 }
-
 ###############################################################################
 # 4 · Smoke test ---------------------------------------------------------------
 ###############################################################################
