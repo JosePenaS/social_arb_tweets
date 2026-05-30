@@ -80,7 +80,7 @@ jobs:
       CACHE_DIR: "cache_px_tp10_sl5"
 
       # Keep Yahoo logs quiet during normal runs
-      DEBUG_YAHOO: "false"
+      DEBUG_YAHOO: "true"
 
       # Production behavior:
       # false = only new recent signals + open/uncompleted trades
