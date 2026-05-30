@@ -180,10 +180,25 @@ normalize_symbol_for_yahoo <- function(sym) {
   )
 }
 
-date_to_unix <- function(x, end_of_day = FALSE) {
-  x <- as.POSIXct(as.Date(x), tz = "UTC")
-  if (end_of_day) x <- x + 86399
-  as.integer(x)
+date_to_unix <- function(x, end_of_day = FALSE, cap_to_now = TRUE) {
+  out <- as.POSIXct(as.Date(x), tz = "UTC")
+  
+  if (end_of_day) {
+    out <- out + 86399
+  }
+  
+  # Yahoo can reject future period2 values.
+  # If to_date is today, end_of_day may be in the future,
+  # so cap it to current UTC time minus a small buffer.
+  if (isTRUE(cap_to_now)) {
+    now_utc <- as.POSIXct(Sys.time(), tz = "UTC") - 60
+    
+    if (!is.na(out) && out > now_utc) {
+      out <- now_utc
+    }
+  }
+  
+  as.integer(floor(as.numeric(out)))
 }
 
 safe_min_date <- function(x) {
@@ -238,8 +253,17 @@ fetch_yahoo_chart_syscurl_text <- function(sym, from_date, to_date, retries = 6,
     return(NULL)
   }
   
-  period1 <- date_to_unix(from_date, end_of_day = FALSE)
-  period2 <- date_to_unix(to_date, end_of_day = TRUE)
+period1 <- date_to_unix(from_date, end_of_day = FALSE, cap_to_now = FALSE)
+period2 <- date_to_unix(to_date, end_of_day = TRUE, cap_to_now = TRUE)
+
+if (is.na(period1) || is.na(period2) || period2 <= period1) {
+  if (debug) {
+    cat("Invalid Yahoo period range after cap.\n")
+    cat("period1:", period1, "\n")
+    cat("period2:", period2, "\n")
+  }
+  return(NULL)
+}
   
   url <- paste0(
     "https://query1.finance.yahoo.com/v8/finance/chart/",
