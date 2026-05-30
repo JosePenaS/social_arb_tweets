@@ -74,6 +74,9 @@ print(DBI::dbGetQuery(con, "select 'connected' as status, now();"))
 
 qid <- function(x) as.character(DBI::dbQuoteIdentifier(con, x))
 
+target_tbl <- DBI::Id(schema = "public", table = SIGNALS_TABLE)
+target_q <- as.character(DBI::dbQuoteIdentifier(con, target_tbl))
+
 ###############################################################################
 # 2) Ensure target table exists ------------------------------------------------
 ###############################################################################
@@ -109,13 +112,43 @@ DBI::dbExecute(
 )
 
 ###############################################################################
-# Create indexes safely --------------------------------------------------------
+# 2.1) Upgrade existing table schema if needed ---------------------------------
 ###############################################################################
 
-target_tbl <- DBI::Id(schema = "public", table = SIGNALS_TABLE)
-target_q <- as.character(DBI::dbQuoteIdentifier(con, target_tbl))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS signal_id text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS username text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS conversation_id text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS created_at timestamptz;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS text text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS ticker text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS conviction double precision;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS direction text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS horizon text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS stop_loss_pct integer;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS buy_zone boolean;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS sentiment_score double precision;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS rationale text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS specificity_score double precision;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS has_quant_data boolean;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS evidence_score double precision;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS evidence_types text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS evidence_snippet text;", target_q))
+DBI::dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS loaded_at timestamptz DEFAULT now();", target_q))
+
+###############################################################################
+# 2.2) Create indexes safely ---------------------------------------------------
+###############################################################################
 
 safe_idx_base <- gsub("[^A-Za-z0-9_]", "_", SIGNALS_TABLE)
+
+DBI::dbExecute(
+  con,
+  sprintf(
+    "CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s(signal_id);",
+    as.character(DBI::dbQuoteIdentifier(con, paste0("idx_", safe_idx_base, "_signal_id_unique"))),
+    target_q
+  )
+)
 
 DBI::dbExecute(
   con,
@@ -432,7 +465,6 @@ DBI::dbWriteTable(
 )
 
 tmp_q <- as.character(DBI::dbQuoteIdentifier(con, DBI::Id(table = tmp_name)))
-target_q <- as.character(DBI::dbQuoteIdentifier(con, DBI::Id(schema = "public", table = SIGNALS_TABLE)))
 
 cols <- names(all_signals)
 cols_q <- vapply(cols, qid, character(1))
@@ -471,4 +503,5 @@ print(
     count(username, sort = TRUE)
 )
 
+cat("generate_tweet_signals.R completed successfully.\n")
 cat("generate_tweet_signals.R completed successfully.\n")
