@@ -201,6 +201,21 @@ date_to_unix <- function(x, end_of_day = FALSE, cap_to_now = TRUE) {
   as.integer(floor(as.numeric(out)))
 }
 
+safe_yahoo_to_date <- function(to_date) {
+  to_date <- as.Date(to_date)
+
+  # Never ask Yahoo daily endpoint for today/future.
+  # Use yesterday at most.
+  safe_to <- min(to_date, Sys.Date() - lubridate::days(1), na.rm = TRUE)
+
+  # Roll back weekends.
+  while (lubridate::wday(safe_to, week_start = 1) %in% c(6, 7)) {
+    safe_to <- safe_to - lubridate::days(1)
+  }
+
+  as.Date(safe_to)
+}                    
+
 safe_min_date <- function(x) {
   x <- as.Date(x)
   if (length(x) == 0 || all(is.na(x))) return(as.Date(NA))
@@ -253,8 +268,20 @@ fetch_yahoo_chart_syscurl_text <- function(sym, from_date, to_date, retries = 6,
     return(NULL)
   }
   
+safe_to_date <- safe_yahoo_to_date(to_date)
+
+if (is.na(safe_to_date) || safe_to_date < as.Date(from_date)) {
+  if (debug) {
+    cat("Invalid Yahoo safe_to_date.\n")
+    cat("from_date:", as.character(from_date), "\n")
+    cat("to_date:", as.character(to_date), "\n")
+    cat("safe_to_date:", as.character(safe_to_date), "\n")
+  }
+  return(NULL)
+}
+
 period1 <- date_to_unix(from_date, end_of_day = FALSE, cap_to_now = FALSE)
-period2 <- date_to_unix(to_date, end_of_day = TRUE, cap_to_now = TRUE)
+period2 <- date_to_unix(safe_to_date, end_of_day = TRUE, cap_to_now = FALSE)
 
 if (is.na(period1) || is.na(period2) || period2 <= period1) {
   if (debug) {
@@ -543,8 +570,8 @@ get_px_cached <- function(sym, from, to, cache_dir = CACHE_DIR, fetch_fn = get_p
 cat("Running price smoke test with AMZN...\n")
 
 smoke_from <- AS_OF_DATE - days(20)
-smoke_to <- AS_OF_DATE
-
+smoke_to <- safe_yahoo_to_date(AS_OF_DATE)
+             
 cat("Price smoke test window:", as.character(smoke_from), "to", as.character(smoke_to), "\n")
 
 smoke_px <- get_px_cached(
