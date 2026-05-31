@@ -292,15 +292,14 @@ if (is.na(period1) || is.na(period2) || period2 <= period1) {
   return(NULL)
 }
   
-  url <- paste0(
-    "https://query1.finance.yahoo.com/v8/finance/chart/",
-    URLencode(yahoo_sym, reserved = TRUE),
-    "?period1=", period1,
-    "&period2=", period2,
-    "&interval=1d",
-    "&events=history",
-    "&includeAdjustedClose=true"
-  )
+url <- paste0(
+  "https://query2.finance.yahoo.com/v8/finance/chart/",
+  URLencode(yahoo_sym, reserved = TRUE),
+  "?period1=", period1,
+  "&period2=", period2,
+  "&interval=1d",
+  "&includeAdjustedClose=true"
+)
   
   curl_bin <- Sys.which("curl")
   
