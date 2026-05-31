@@ -214,6 +214,24 @@ safe_yahoo_to_date <- function(to_date) {
   }
 
   as.Date(safe_to)
+} 
+
+yahoo_period1 <- function(from_date) {
+  out <- as.POSIXct(as.Date(from_date), tz = "UTC")
+  as.integer(floor(as.numeric(out)))
+}
+
+yahoo_period2 <- function(to_date) {
+  safe_to <- safe_yahoo_to_date(to_date)
+
+  # Use US market close time instead of 23:59:59 UTC.
+  # Yahoo can reject end-of-day/future-ish period2 values.
+  out <- as.POSIXct(
+    paste(as.Date(safe_to), "16:00:00"),
+    tz = "America/New_York"
+  )
+
+  as.integer(floor(as.numeric(out)))
 }                    
 
 safe_min_date <- function(x) {
@@ -280,8 +298,8 @@ if (is.na(safe_to_date) || safe_to_date < as.Date(from_date)) {
   return(NULL)
 }
 
-period1 <- date_to_unix(from_date, end_of_day = FALSE, cap_to_now = FALSE)
-period2 <- date_to_unix(safe_to_date, end_of_day = TRUE, cap_to_now = FALSE)
+period1 <- yahoo_period1(from_date)
+period2 <- yahoo_period2(safe_to_date)
 
 if (is.na(period1) || is.na(period2) || period2 <= period1) {
   if (debug) {
