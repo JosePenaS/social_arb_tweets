@@ -410,15 +410,14 @@ fetch_yahoo_chart_syscurl_text <- function(sym, from_date, to_date, retries = 6,
   period1 <- date_to_unix(from_date, end_of_day = FALSE)
   period2 <- date_to_unix(to_date, end_of_day = TRUE)
 
-  url <- paste0(
-    "https://query1.finance.yahoo.com/v8/finance/chart/",
-    URLencode(yahoo_sym, reserved = TRUE),
-    "?period1=", period1,
-    "&period2=", period2,
-    "&interval=1d",
-    "&events=history",
-    "&includeAdjustedClose=true"
-  )
+url <- paste0(
+  "https://query2.finance.yahoo.com/v8/finance/chart/",
+  URLencode(yahoo_sym, reserved = TRUE),
+  "?period1=", period1,
+  "&period2=", period2,
+  "&interval=1d",
+  "&includeAdjustedClose=true"
+)
 
   curl_bin <- Sys.which("curl")
   if (!nzchar(curl_bin)) stop("curl not found on system PATH")
@@ -786,11 +785,29 @@ print(signals_vol_base %>% summarise(total_rows = n(), unique_tickers = n_distin
 # 7) Fetch price data ----------------------------------------------------------
 ###############################################################################
 
+safe_yahoo_to_date <- function(to_date) {
+  to_date <- as.Date(to_date)
+
+  safe_to <- min(to_date, Sys.Date() - lubridate::days(1), na.rm = TRUE)
+
+  while (lubridate::wday(safe_to, week_start = 1) %in% c(6, 7)) {
+    safe_to <- safe_to - lubridate::days(1)
+  }
+
+  as.Date(safe_to)
+}
+
 ticker_ranges <- signals_vol_base %>%
   group_by(ticker) %>%
   summarise(
     from_date = min(signal_date, na.rm = TRUE) - lubridate::days(260),
-    to_date = max(AS_OF_DATE + lubridate::days(1), max(signal_date, na.rm = TRUE) + lubridate::days(1), na.rm = TRUE),
+    to_date = safe_yahoo_to_date(
+      max(
+        AS_OF_DATE,
+        max(signal_date, na.rm = TRUE),
+        na.rm = TRUE
+      )
+    ),
     .groups = "drop"
   )
 
