@@ -472,13 +472,15 @@ fetch_yahoo_chart_range_text <- function(sym, range = "10y", retries = 4, debug 
     return(NULL)
   }
 
-  url <- paste0(
-    "https://query2.finance.yahoo.com/v8/finance/chart/",
-    URLencode(yahoo_sym, reserved = TRUE),
-    "?range=", range,
-    "&interval=1d",
-    "&includeAdjustedClose=true"
-  )
+url <- paste0(
+  "https://query2.finance.yahoo.com/v8/finance/chart/",
+  URLencode(yahoo_sym, reserved = TRUE),
+  "?range=", range,
+  "&interval=1d",
+  "&events=history",
+  "&includePrePost=false",
+  "&includeAdjustedClose=true"
+)
 
   curl_bin <- Sys.which("curl")
 
@@ -617,11 +619,11 @@ fetch_px_yahoo_chart <- function(sym, from_date, to_date, debug = DEBUG_YAHOO) {
   if (nrow(px) == 0) {
     message("Period-based Yahoo fetch failed for ", sym, ". Trying range=10y fallback...")
 
-    txt2 <- fetch_yahoo_chart_range_text(
-      sym = sym,
-      range = "10y",
-      debug = debug
-    )
+txt2 <- fetch_yahoo_chart_range_text(
+  sym = sym,
+  range = "1y",
+  debug = debug
+)
 
     px <- read_yahoo_chart_text(txt2)
   }
