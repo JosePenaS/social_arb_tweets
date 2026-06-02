@@ -277,8 +277,8 @@ build_signal_key <- function(signal_id, username, conversation_id, ticker, tweet
 # 3 · Yahoo fetch + cache -------------------------------------------------------
 ###############################################################################
 
-fetch_yahoo_chart_range_text <- function(sym, range = "10y", retries = 4, debug = DEBUG_YAHOO) {
-  if (!nzchar(sym)) return(NULL)
+fetch_yahoo_chart_range_text <- function(sym, range = "1y", retries = 4, debug = DEBUG_YAHOO) {
+  if (is.na(sym) || !nzchar(sym)) return(NULL)
 
   yahoo_sym <- normalize_symbol_for_yahoo(sym)
 
@@ -286,12 +286,9 @@ fetch_yahoo_chart_range_text <- function(sym, range = "10y", retries = 4, debug 
     return(NULL)
   }
 
-  url <- paste0(
+  base_url <- paste0(
     "https://query2.finance.yahoo.com/v8/finance/chart/",
-    URLencode(yahoo_sym, reserved = TRUE),
-    "?range=", range,
-    "&interval=1d",
-    "&includeAdjustedClose=true"
+    URLencode(yahoo_sym, reserved = TRUE)
   )
 
   curl_bin <- Sys.which("curl")
@@ -308,21 +305,29 @@ fetch_yahoo_chart_range_text <- function(sym, range = "10y", retries = 4, debug 
     "--silent",
     "--show-error",
     "--user-agent", "Mozilla/5.0",
-    url
+    "-G",
+    base_url,
+    "--data-urlencode", paste0("range=", range),
+    "--data-urlencode", "interval=1d",
+    "--data-urlencode", "events=history",
+    "--data-urlencode", "includePrePost=false",
+    "--data-urlencode", "includeAdjustedClose=true"
+  )
+
+  debug_url <- paste0(
+    base_url,
+    "?range=", range,
+    "&interval=1d",
+    "&events=history",
+    "&includePrePost=false",
+    "&includeAdjustedClose=true"
   )
 
   for (k in seq_len(retries)) {
     err_file <- tempfile(fileext = ".txt")
 
     out <- tryCatch(
-      suppressWarnings(
-        system2(
-          curl_bin,
-          args = args,
-          stdout = TRUE,
-          stderr = err_file
-        )
-      ),
+      suppressWarnings(system2(curl_bin, args = args, stdout = TRUE, stderr = err_file)),
       error = function(e) e
     )
 
@@ -347,7 +352,7 @@ fetch_yahoo_chart_range_text <- function(sym, range = "10y", retries = 4, debug 
       cat("Range fallback attempt:", k, "\n")
       cat("Ticker:", sym, "\n")
       cat("Yahoo symbol:", yahoo_sym, "\n")
-      cat("URL:", url, "\n")
+      cat("URL:", debug_url, "\n")
       cat("Status:", status, "\n")
       cat("Response chars:", nchar(txt), "\n")
       cat("Starts with:", substr(txt, 1, 200), "\n")
@@ -368,56 +373,47 @@ fetch_yahoo_chart_range_text <- function(sym, range = "10y", retries = 4, debug 
 
   NULL
 }
+
                     
 
 fetch_yahoo_chart_syscurl_text <- function(sym, from_date, to_date, retries = 6, debug = DEBUG_YAHOO) {
   if (is.na(from_date) || is.na(to_date) || !nzchar(sym)) return(NULL)
-  
+
   yahoo_sym <- normalize_symbol_for_yahoo(sym)
-  
-  if (is.na(yahoo_sym) || !nzchar(yahoo_sym)) {
+  if (is.na(yahoo_sym) || !nzchar(yahoo_sym)) return(NULL)
+
+  safe_to_date <- safe_yahoo_to_date(to_date)
+
+  if (is.na(safe_to_date) || safe_to_date < as.Date(from_date)) {
+    if (debug) {
+      cat("Invalid Yahoo safe_to_date.\n")
+      cat("from_date:", as.character(from_date), "\n")
+      cat("to_date:", as.character(to_date), "\n")
+      cat("safe_to_date:", as.character(safe_to_date), "\n")
+    }
     return(NULL)
   }
-  
-safe_to_date <- safe_yahoo_to_date(to_date)
 
-if (is.na(safe_to_date) || safe_to_date < as.Date(from_date)) {
-  if (debug) {
-    cat("Invalid Yahoo safe_to_date.\n")
-    cat("from_date:", as.character(from_date), "\n")
-    cat("to_date:", as.character(to_date), "\n")
-    cat("safe_to_date:", as.character(safe_to_date), "\n")
+  period1 <- date_to_unix(from_date, end_of_day = FALSE, cap_to_now = FALSE)
+  period2 <- date_to_unix(safe_to_date, end_of_day = TRUE, cap_to_now = FALSE)
+
+  if (is.na(period1) || is.na(period2) || period2 <= period1) {
+    if (debug) {
+      cat("Invalid Yahoo period range.\n")
+      cat("period1:", period1, "\n")
+      cat("period2:", period2, "\n")
+    }
+    return(NULL)
   }
-  return(NULL)
-}
 
-period1 <- yahoo_period1(from_date)
-period2 <- yahoo_period2(safe_to_date)
+  base_url <- paste0(
+    "https://query2.finance.yahoo.com/v8/finance/chart/",
+    URLencode(yahoo_sym, reserved = TRUE)
+  )
 
-if (is.na(period1) || is.na(period2) || period2 <= period1) {
-  if (debug) {
-    cat("Invalid Yahoo period range after cap.\n")
-    cat("period1:", period1, "\n")
-    cat("period2:", period2, "\n")
-  }
-  return(NULL)
-}
-  
-url <- paste0(
-  "https://query2.finance.yahoo.com/v8/finance/chart/",
-  URLencode(yahoo_sym, reserved = TRUE),
-  "?period1=", period1,
-  "&period2=", period2,
-  "&interval=1d",
-  "&includeAdjustedClose=true"
-)
-  
   curl_bin <- Sys.which("curl")
-  
-  if (!nzchar(curl_bin)) {
-    stop("curl not found on system PATH")
-  }
-  
+  if (!nzchar(curl_bin)) stop("curl not found on system PATH")
+
   args <- c(
     "--http1.1",
     "--ipv4",
@@ -426,52 +422,54 @@ url <- paste0(
     "--silent",
     "--show-error",
     "--user-agent", "Mozilla/5.0",
-    url
+    "-G",
+    base_url,
+    "--data-urlencode", paste0("period1=", period1),
+    "--data-urlencode", paste0("period2=", period2),
+    "--data-urlencode", "interval=1d",
+    "--data-urlencode", "includeAdjustedClose=true"
   )
-  
+
+  debug_url <- paste0(
+    base_url,
+    "?period1=", period1,
+    "&period2=", period2,
+    "&interval=1d",
+    "&includeAdjustedClose=true"
+  )
+
   for (k in seq_len(retries)) {
     err_file <- tempfile(fileext = ".txt")
-    
+
     out <- tryCatch(
-      suppressWarnings(
-        system2(
-          curl_bin,
-          args = args,
-          stdout = TRUE,
-          stderr = err_file
-        )
-      ),
+      suppressWarnings(system2(curl_bin, args = args, stdout = TRUE, stderr = err_file)),
       error = function(e) e
     )
-    
+
     status <- if (inherits(out, "error")) 1L else attr(out, "status")
     if (is.null(status)) status <- 0L
-    
-    txt <- if (inherits(out, "error")) {
-      ""
-    } else {
-      paste(out, collapse = "")
-    }
-    
+
+    txt <- if (inherits(out, "error")) "" else paste(out, collapse = "")
+
     err_txt <- if (file.exists(err_file)) {
       paste(readLines(err_file, warn = FALSE), collapse = "\n")
     } else {
       ""
     }
-    
+
     if (file.exists(err_file)) unlink(err_file)
-    
+
     if (debug) {
       cat("Attempt:", k, "\n")
       cat("Ticker:", sym, "\n")
       cat("Yahoo symbol:", yahoo_sym, "\n")
-      cat("URL:", url, "\n")
+      cat("URL:", debug_url, "\n")
       cat("Status:", status, "\n")
       cat("Response chars:", nchar(txt), "\n")
       cat("Starts with:", substr(txt, 1, 200), "\n")
       if (nzchar(err_txt)) cat("Curl stderr:", err_txt, "\n")
     }
-    
+
     if (
       identical(as.integer(status), 0L) &&
       nzchar(txt) &&
@@ -480,12 +478,13 @@ url <- paste0(
     ) {
       return(txt)
     }
-    
-    Sys.sleep(min(2^k, 10))
+
+    Sys.sleep(min(2^k, 8))
   }
-  
+
   NULL
 }
+
 
 
 empty_px_tbl <- function() {
@@ -578,11 +577,11 @@ get_px_via_syscurl_yahoo <- function(sym, from, to, debug = DEBUG_YAHOO) {
   px <- read_yahoo_chart_text(txt)
 
   if (nrow(px) == 0) {
-    message("Period-based Yahoo fetch failed for ", sym, ". Trying range=10y fallback...")
+    message("Period-based Yahoo fetch failed for ", sym, ". Trying Yahoo range fallback...")
 
     txt2 <- fetch_yahoo_chart_range_text(
       sym = sym,
-      range = "10y",
+      range = "1y",
       debug = debug
     )
 
