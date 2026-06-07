@@ -219,7 +219,7 @@ jobs:
             grep -n "RUNNING FILE: refresh_backtest_results" refresh_backtest_results_gap_aware.R || true
 
             echo "Checking gap-aware target table variable..."
-            grep -n "GAPAWARE_BACKTEST_TABLE\|TARGET_TABLE_NAME\|twitter_backtest_results_10_perc_strategy_gapaware" refresh_backtest_results_gap_aware.R || true
+            grep -n "GAPAWARE_BACKTEST_TABLE\|TARGET_TABLE_NAME\|BACKTEST_TABLE\|twitter_backtest_results_10_perc_strategy_gapaware" refresh_backtest_results_gap_aware.R || true
 
             echo "Checking gap-aware exit types..."
             grep -n "gap_stop\|gap_target\|intraday_stop\|intraday_target" refresh_backtest_results_gap_aware.R || true
@@ -244,6 +244,9 @@ jobs:
           fi
 
       - name: Refresh gap-aware backtest results
+        env:
+          BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy_gapaware"
+          GAPAWARE_BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy_gapaware"
         run: |
           if [ -f "refresh_backtest_results_gap_aware.R" ]; then
             Rscript refresh_backtest_results_gap_aware.R
