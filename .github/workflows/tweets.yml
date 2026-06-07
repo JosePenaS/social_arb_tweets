@@ -66,7 +66,12 @@ jobs:
       # Tables
       SIGNALS_TABLE: "twitter_trade_signals"
       FEATURES_TABLE: "twitter_trade_signal_features"
+
+      # Original backtest target table
       BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy"
+
+      # Gap-aware backtest target table
+      GAPAWARE_BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy_gapaware"
 
       # Strategy settings
       STRATEGY_LABEL: "tp10_sl5"
@@ -76,10 +81,10 @@ jobs:
       LOCKUP_DAYS: "30"
       SMA_LEN: "10"
 
-      # Yahoo cache for backtest script
+      # Yahoo cache for backtest scripts
       CACHE_DIR: "cache_px_tp10_sl5"
 
-      # Keep Yahoo logs quiet during normal runs
+      # Yahoo logs
       DEBUG_YAHOO: "true"
 
       # Production behavior:
@@ -193,14 +198,55 @@ jobs:
 
       - name: Debug refresh file contents
         run: |
-          echo "Checking for problematic Yahoo curl headers..."
-          grep -n "application/json\|Accept:" refresh_backtest_results.R || true
-          echo "Checking Yahoo fetch function definition..."
-          grep -n "fetch_yahoo_chart_syscurl" refresh_backtest_results.R || true
-          echo "Checking production selection logic..."
-          grep -n "NEW_SIGNAL_LOOKBACK_DAYS\|new_recent_signals\|open_signals" refresh_backtest_results.R || true
-          echo "Checking feature refresh file..."
-          grep -n "RUNNING FILE: refresh_trade_signal_features" refresh_trade_signal_features.R || true
+          echo "Checking original refresh_backtest_results.R..."
+          if [ -f "refresh_backtest_results.R" ]; then
+            echo "Checking for problematic Yahoo curl headers..."
+            grep -n "application/json\|Accept:" refresh_backtest_results.R || true
 
-      - name: Refresh backtest results
-        run: Rscript refresh_backtest_results.R
+            echo "Checking Yahoo fetch function definition..."
+            grep -n "fetch_yahoo_chart_syscurl" refresh_backtest_results.R || true
+
+            echo "Checking production selection logic..."
+            grep -n "NEW_SIGNAL_LOOKBACK_DAYS\|new_recent_signals\|open_signals" refresh_backtest_results.R || true
+          else
+            echo "refresh_backtest_results.R not found."
+          fi
+
+          echo ""
+          echo "Checking gap-aware refresh file..."
+          if [ -f "refresh_backtest_results_gap_aware.R" ]; then
+            echo "Checking gap-aware file banner..."
+            grep -n "RUNNING FILE: refresh_backtest_results" refresh_backtest_results_gap_aware.R || true
+
+            echo "Checking gap-aware target table variable..."
+            grep -n "GAPAWARE_BACKTEST_TABLE\|TARGET_TABLE_NAME\|twitter_backtest_results_10_perc_strategy_gapaware" refresh_backtest_results_gap_aware.R || true
+
+            echo "Checking gap-aware exit types..."
+            grep -n "gap_stop\|gap_target\|intraday_stop\|intraday_target" refresh_backtest_results_gap_aware.R || true
+          else
+            echo "refresh_backtest_results_gap_aware.R not found."
+          fi
+
+          echo ""
+          echo "Checking feature refresh file..."
+          if [ -f "refresh_trade_signal_features.R" ]; then
+            grep -n "RUNNING FILE: refresh_trade_signal_features" refresh_trade_signal_features.R || true
+          else
+            echo "refresh_trade_signal_features.R not found."
+          fi
+
+      - name: Refresh original backtest results
+        run: |
+          if [ -f "refresh_backtest_results.R" ]; then
+            Rscript refresh_backtest_results.R
+          else
+            echo "refresh_backtest_results.R not found, skipping original backtest refresh."
+          fi
+
+      - name: Refresh gap-aware backtest results
+        run: |
+          if [ -f "refresh_backtest_results_gap_aware.R" ]; then
+            Rscript refresh_backtest_results_gap_aware.R
+          else
+            echo "refresh_backtest_results_gap_aware.R not found, skipping gap-aware backtest refresh."
+          fi
