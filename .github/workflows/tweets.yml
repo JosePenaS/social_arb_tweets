@@ -73,7 +73,7 @@ jobs:
       # Gap-aware backtest target table
       GAPAWARE_BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy_gapaware"
 
-      # Strategy settings
+      # Original strategy settings
       STRATEGY_LABEL: "tp10_sl5"
       TARGET_PCT: "0.10"
       STOP_PCT: "0.05"
@@ -247,6 +247,7 @@ jobs:
         env:
           BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy_gapaware"
           GAPAWARE_BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy_gapaware"
+          STRATEGY_LABEL: "tp10_sl5_gapaware"
         run: |
           if [ -f "refresh_backtest_results_gap_aware.R" ]; then
             Rscript refresh_backtest_results_gap_aware.R
