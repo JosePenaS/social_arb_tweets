@@ -249,9 +249,11 @@ make_ts_key <- function(x) {
 }
 
 build_signal_key <- function(signal_id, username, conversation_id, ticker, tweet_ts_et) {
+  if (length(signal_id) == 0) return(character())
+
   signal_id_clean <- trimws(as.character(signal_id))
   signal_id_clean[is.na(signal_id_clean)] <- ""
-
+  
   fallback_key <- paste(
     "fallback",
     as.character(username),
@@ -260,7 +262,7 @@ build_signal_key <- function(signal_id, username, conversation_id, ticker, tweet
     make_ts_key(tweet_ts_et),
     sep = "__"
   )
-
+  
   ifelse(
     nzchar(signal_id_clean),
     paste0("signal_id::", signal_id_clean),
@@ -915,10 +917,17 @@ get_existing_backtest <- function() {
     )
 }
 
-existing_backtest <- get_existing_backtest()
+existing_backtest <- get_existing_backtest() %>%
+  mutate(
+    signal_key = as.character(signal_key),
+    trade_status = as.character(trade_status),
+    completed = as.logical(completed)
+  )
+
 cat("Existing backtest rows:", nrow(existing_backtest), "\n")
 
 existing_keys <- existing_backtest %>%
+  transmute(signal_key = as.character(signal_key)) %>%
   filter(!is.na(signal_key), nzchar(signal_key)) %>%
   distinct(signal_key)
 
@@ -929,6 +938,7 @@ open_keys <- existing_backtest %>%
       is.na(trade_status) |
       trade_status != "completed"
   ) %>%
+  transmute(signal_key = as.character(signal_key)) %>%
   filter(!is.na(signal_key), nzchar(signal_key)) %>%
   distinct(signal_key)
 
