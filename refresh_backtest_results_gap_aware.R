@@ -69,8 +69,8 @@ STRATEGY_LABEL <- Sys.getenv("STRATEGY_LABEL", "tp10_sl5")
 FEATURES_TABLE <- Sys.getenv("FEATURES_TABLE", "twitter_trade_signal_features")
 
 TARGET_TABLE_NAME <- Sys.getenv(
-  "BACKTEST_TABLE",
-  "twitter_backtest_results_10_perc_strategy"
+  "GAPAWARE_BACKTEST_TABLE",
+  "twitter_backtest_results_10_perc_strategy_gapaware"
 )
 
 TARGET_PCT <- env_num("TARGET_PCT", 0.10)
