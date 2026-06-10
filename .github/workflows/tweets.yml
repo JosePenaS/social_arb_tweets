@@ -35,16 +35,16 @@ on:
 
   schedule:
     # 9:00 AM New York during EST
-    - cron: "0 14 * * 1-5"
+    - cron: "0 14 * * *"
 
     # 9:00 AM New York during EDT
-    - cron: "0 13 * * 1-5"
+    - cron: "0 13 * * *"
 
     # 3:30 PM New York during EST
-    - cron: "30 20 * * 1-5"
+    - cron: "30 20 * * *"
 
     # 3:30 PM New York during EDT
-    - cron: "30 19 * * 1-5"
+    - cron: "30 19 * * *"
 
 jobs:
   scrape-generate-refresh:
