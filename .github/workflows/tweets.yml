@@ -33,6 +33,26 @@ on:
         required: false
         default: "30"
 
+      run_exit_grid:
+        description: "Run raw exit-grid refresh/upload?"
+        required: false
+        default: "true"
+
+      exit_grid_force_rebuild:
+        description: "Force rebuild full raw exit grid? Very heavy. Use true only manually."
+        required: false
+        default: "false"
+
+      exit_grid_max_rows:
+        description: "Max raw exit-grid signals to process. Use Inf for all selected rows."
+        required: false
+        default: "Inf"
+
+      exit_grid_new_signal_lookback_days:
+        description: "Only process new raw exit-grid signals from the last N days unless force rebuild."
+        required: false
+        default: "31"
+
   schedule:
     # 9:00 AM New York during EST
     - cron: "0 14 * * *"
@@ -105,6 +125,26 @@ jobs:
       # Optional manual controls
       MAX_ROWS_LOCAL: ${{ github.event.inputs.max_rows || 'Inf' }}
       AS_OF_DATE: ${{ github.event.inputs.as_of_date || '' }}
+
+      # -----------------------------------------------------------------------
+      # Raw exit-grid refresh/upload
+      # -----------------------------------------------------------------------
+      # This updates public.twitter_exit_grid_results_raw only.
+      EXIT_GRID_ENABLED: ${{ github.event.inputs.run_exit_grid || 'true' }}
+      EXIT_GRID_FORCE_REBUILD: ${{ github.event.inputs.exit_grid_force_rebuild || 'false' }}
+      EXIT_GRID_MAX_ROWS_LOCAL: ${{ github.event.inputs.exit_grid_max_rows || 'Inf' }}
+      EXIT_GRID_NEW_SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.exit_grid_new_signal_lookback_days || '31' }}
+
+      EXIT_GRID_TARGET_TABLE: "twitter_exit_grid_results_raw"
+      EXIT_GRID_RUN_LABEL: "exit_grid_tp10_sl5_raw_allsignals_27combos_v1"
+      EXIT_GRID_UPLOAD_CHUNK_SIZE: "5000"
+
+      # Raw exit-grid parameters
+      EXIT_GRID_TARGET_PCTS: "0.10"
+      EXIT_GRID_STOP_PCTS: "0.05"
+      EXIT_GRID_RUNNER_SHARES: "0.3333333333333333,0.50,0.6666666666666666"
+      EXIT_GRID_SMA_LENS: "10,15,20"
+      EXIT_GRID_LOCKUPS: "10,20,30"
 
     steps:
       - name: Checkout repository
@@ -235,6 +275,16 @@ jobs:
             echo "refresh_trade_signal_features.R not found."
           fi
 
+          echo ""
+          echo "Checking raw exit-grid refresh file..."
+          if [ -f "refresh_exit_grid_results_raw.R" ]; then
+            grep -n "RUNNING FILE: refresh_exit_grid_results_raw" refresh_exit_grid_results_raw.R || true
+            grep -n "EXIT_GRID_TARGET_TABLE\|twitter_exit_grid_results_raw\|EXIT_GRID_RUN_LABEL" refresh_exit_grid_results_raw.R || true
+            grep -n "runner_share\|sma_len\|lockup" refresh_exit_grid_results_raw.R | head -40 || true
+          else
+            echo "refresh_exit_grid_results_raw.R not found."
+          fi
+
       - name: Refresh original backtest results
         run: |
           if [ -f "refresh_backtest_results.R" ]; then
@@ -253,4 +303,16 @@ jobs:
             Rscript refresh_backtest_results_gap_aware.R
           else
             echo "refresh_backtest_results_gap_aware.R not found, skipping gap-aware backtest refresh."
+          fi
+
+      - name: Refresh raw exit grid results
+        run: |
+          if [ "${EXIT_GRID_ENABLED}" = "true" ] && [ -f "refresh_exit_grid_results_raw.R" ]; then
+            Rscript refresh_exit_grid_results_raw.R
+          else
+            echo "Skipping raw exit grid refresh."
+            echo "EXIT_GRID_ENABLED=${EXIT_GRID_ENABLED}"
+            if [ ! -f "refresh_exit_grid_results_raw.R" ]; then
+              echo "refresh_exit_grid_results_raw.R not found."
+            fi
           fi
