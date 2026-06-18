@@ -93,7 +93,7 @@ jobs:
       # Gap-aware backtest target table
       GAPAWARE_BACKTEST_TABLE: "twitter_backtest_results_10_perc_strategy_gapaware"
 
-      # Original strategy settings
+      # Current production strategy settings
       STRATEGY_LABEL: "tp10_sl5"
       TARGET_PCT: "0.10"
       STOP_PCT: "0.05"
@@ -101,23 +101,17 @@ jobs:
       LOCKUP_DAYS: "30"
       SMA_LEN: "10"
 
-      # Yahoo cache for backtest scripts
+      # Yahoo cache for backtest/grid scripts
       CACHE_DIR: "cache_px_tp10_sl5"
 
       # Yahoo logs
       DEBUG_YAHOO: "true"
 
-      # Production behavior:
-      # false = only new recent signals + open/uncompleted trades
-      # true = rerun every valid signal
+      # Production backtest behavior
       FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
-
-      # Only new signals within this window are processed by backtest.
-      # Open/uncompleted trades are refreshed regardless of age.
       NEW_SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.new_signal_lookback_days || '30' }}
 
-      # Feature refresh:
-      # processes rows missing features + recent signals within this window
+      # Feature refresh behavior
       FEATURE_LOOKBACK_DAYS: ${{ github.event.inputs.feature_lookback_days || '30' }}
       MAX_FEATURE_ROWS: ${{ github.event.inputs.max_feature_rows || 'Inf' }}
       MAX_FEATURE_LAG_DAYS: "7"
@@ -128,8 +122,8 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Raw exit-grid refresh/upload
+      # This updates public.twitter_exit_grid_results_raw.
       # -----------------------------------------------------------------------
-      # This updates public.twitter_exit_grid_results_raw only.
       EXIT_GRID_ENABLED: ${{ github.event.inputs.run_exit_grid || 'true' }}
       EXIT_GRID_FORCE_REBUILD: ${{ github.event.inputs.exit_grid_force_rebuild || 'false' }}
       EXIT_GRID_MAX_ROWS_LOCAL: ${{ github.event.inputs.exit_grid_max_rows || 'Inf' }}
@@ -139,7 +133,7 @@ jobs:
       EXIT_GRID_RUN_LABEL: "exit_grid_tp10_sl5_raw_allsignals_27combos_v1"
       EXIT_GRID_UPLOAD_CHUNK_SIZE: "5000"
 
-      # Raw exit-grid parameters
+      # Raw exit-grid parameter space
       EXIT_GRID_TARGET_PCTS: "0.10"
       EXIT_GRID_STOP_PCTS: "0.05"
       EXIT_GRID_RUNNER_SHARES: "0.3333333333333333,0.50,0.6666666666666666"
