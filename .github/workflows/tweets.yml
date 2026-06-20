@@ -1,7 +1,7 @@
 name: Scrape Tweets + Generate Signals + Refresh Backtest
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: 
     inputs:
       force_rebuild:
         description: "Force rebuild all rows? Use true only when you intentionally want to recalculate everything."
@@ -98,6 +98,7 @@ jobs:
       TARGET_PCT: "0.10"
       STOP_PCT: "0.05"
       LOOKBACK_DAYS: "30"
+      X_LOOKBACK_HOURS: "36"
       LOCKUP_DAYS: "30"
       SMA_LEN: "10"
 
