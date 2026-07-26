@@ -53,6 +53,21 @@ on:
         required: false
         default: "31"
 
+      exit_grid_run_label:
+        description: "Raw exit-grid run label. Use tp20/sl10 label to add a second grid run without replacing tp10/sl5."
+        required: false
+        default: "exit_grid_tp10_sl5_raw_allsignals_27combos_v1"
+
+      exit_grid_target_pcts:
+        description: "Raw exit-grid target pct(s), comma-separated. Example: 0.20 for +20% target."
+        required: false
+        default: "0.10"
+
+      exit_grid_stop_pcts:
+        description: "Raw exit-grid stop pct(s), comma-separated. Example: 0.10 for -10% stop."
+        required: false
+        default: "0.05"
+
   schedule:
     # 9:00 AM New York during EST
     - cron: "0 14 * * *"
@@ -131,12 +146,12 @@ jobs:
       EXIT_GRID_NEW_SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.exit_grid_new_signal_lookback_days || '31' }}
 
       EXIT_GRID_TARGET_TABLE: "twitter_exit_grid_results_raw"
-      EXIT_GRID_RUN_LABEL: "exit_grid_tp10_sl5_raw_allsignals_27combos_v1"
+      EXIT_GRID_RUN_LABEL: ${{ github.event.inputs.exit_grid_run_label || 'exit_grid_tp10_sl5_raw_allsignals_27combos_v1' }}
       EXIT_GRID_UPLOAD_CHUNK_SIZE: "5000"
 
       # Raw exit-grid parameter space
-      EXIT_GRID_TARGET_PCTS: "0.10"
-      EXIT_GRID_STOP_PCTS: "0.05"
+      EXIT_GRID_TARGET_PCTS: ${{ github.event.inputs.exit_grid_target_pcts || '0.10' }}
+      EXIT_GRID_STOP_PCTS: ${{ github.event.inputs.exit_grid_stop_pcts || '0.05' }}
       EXIT_GRID_RUNNER_SHARES: "0.3333333333333333,0.50,0.6666666666666666"
       EXIT_GRID_SMA_LENS: "10,15,20"
       EXIT_GRID_LOCKUPS: "10,20,30"
