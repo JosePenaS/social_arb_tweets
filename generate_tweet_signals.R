@@ -432,9 +432,20 @@ all_signals <- purrr::map_dfr(seq_len(nrow(collapsed)), function(i) {
     text = row$text
   )
   
-  sig_tbl <- signals_to_tbl(out, row)
-  
-  message("  Signals extracted: ", nrow(sig_tbl))
+raw_sigs <- out$signals %||% list()
+
+message("  Raw GPT signals: ", length(raw_sigs))
+
+if (length(raw_sigs) > 0) {
+  message(
+    "  GPT output: ",
+    jsonlite::toJSON(out, auto_unbox = TRUE, null = "null")
+  )
+}
+
+sig_tbl <- signals_to_tbl(out, row)
+
+message("  Valid signals after cleaning: ", nrow(sig_tbl))
   
   sig_tbl
 })
