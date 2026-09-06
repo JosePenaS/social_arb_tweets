@@ -49,7 +49,7 @@ if (!nzchar(SUPABASE_PWD))  stop("Missing env var: SUPABASE_PWD")
 # Handles list (comma-separated) OR fallback list
 handles <- trimws(strsplit(Sys.getenv(
   "TW_HANDLES",
-  "ChrisCamillo,NolanAntonucci,ConsensusGurus,jordan_mclain,tickerplus,davehanson,AstutexAi,SingularityRes"
+  "ChrisCamillo,NolanAntonucci,ConsensusGurus,jordan_mclain,tickerplus,davehanson,AstutexAi,SingularityRes,GirlfriendIndex"
 ), ",")[[1]])
 
 handles <- handles[nzchar(handles)]
