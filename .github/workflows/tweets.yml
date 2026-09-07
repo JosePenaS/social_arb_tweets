@@ -98,6 +98,9 @@ jobs:
       X_BEARER: ${{ secrets.X_BEARER }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
+      # X accounts
+      TW_HANDLES: "ChrisCamillo,tickerplus,NolanAntonucci,davehanson,AstutexAi,jordan_mclain,ConsensusGurus,SingularityRes,GirlfriendIndex"
+
       # Tables
       SIGNALS_TABLE: "twitter_trade_signals"
       FEATURES_TABLE: "twitter_trade_signal_features"
