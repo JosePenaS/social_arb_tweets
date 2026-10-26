@@ -116,7 +116,7 @@ jobs:
       TARGET_PCT: "0.10"
       STOP_PCT: "0.05"
       LOOKBACK_DAYS: "30"
-      X_LOOKBACK_HOURS: "510"
+      X_LOOKBACK_HOURS: "24"
       LOCKUP_DAYS: "30"
       SMA_LEN: "10"
 
