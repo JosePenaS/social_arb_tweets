@@ -215,6 +215,7 @@ jobs:
             any::tidyr
             any::readr
             any::tidyquant
+            any::digest
 
       - name: Restore Yahoo price cache
         uses: actions/cache@v4
