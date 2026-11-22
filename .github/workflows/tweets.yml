@@ -18,6 +18,21 @@ on:
         required: false
         default: "Inf"
 
+      x_lookback_hours:
+        description: "Hours of tweets to scrape. Default 24; raise it once to recover a gap (e.g. 240 = 10 days)."
+        required: false
+        default: "24"
+
+      signal_lookback_days:
+        description: "Score unscored conversations from the last N days (default 14)."
+        required: false
+        default: "14"
+
+      max_conversations:
+        description: "Max conversations to score in this run (default 150)."
+        required: false
+        default: "150"
+
       as_of_date:
         description: "Optional AS_OF_DATE in YYYY-MM-DD. Leave blank to use current New York date."
         required: false
@@ -116,7 +131,9 @@ jobs:
       TARGET_PCT: "0.10"
       STOP_PCT: "0.05"
       LOOKBACK_DAYS: "30"
-      X_LOOKBACK_HOURS: "24"
+      X_LOOKBACK_HOURS: ${{ github.event.inputs.x_lookback_hours || '24' }}
+      SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.signal_lookback_days || '14' }}
+      MAX_CONVERSATIONS: ${{ github.event.inputs.max_conversations || '150' }}
       LOCKUP_DAYS: "30"
       SMA_LEN: "10"
 
@@ -226,6 +243,7 @@ jobs:
             yahoo-price-cache-tp10-sl5-${{ runner.os }}-
 
       - name: Scrape tweets
+        id: scrape
         continue-on-error: true
         run: |
           if [ -f "twitter_ingest.R" ]; then
@@ -330,3 +348,11 @@ jobs:
               echo "refresh_exit_grid_results_raw.R not found."
             fi
           fi
+
+      # The scrape step may fail without stopping the rest of the pipeline,
+      # but the run must still end as failed so GitHub sends a notification.
+      - name: Fail the run if scraping failed
+        if: steps.scrape.outcome == 'failure'
+        run: |
+          echo "::error title=Tweet scrape failed::Scraping failed (check X API credits or token). Signals, features and backtests still ran on existing data."
+          exit 1
