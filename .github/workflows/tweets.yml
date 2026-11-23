@@ -23,6 +23,16 @@ on:
         required: false
         default: "24"
 
+      x_start_time:
+        description: "Optional exact scrape start, UTC (e.g. 2026-11-12T20:00:00Z). Use with end; overrides the hours box."
+        required: false
+        default: ""
+
+      x_end_time:
+        description: "Optional exact scrape end, UTC (e.g. 2026-11-13T03:00:00Z). Use with start."
+        required: false
+        default: ""
+
       signal_lookback_days:
         description: "Score unscored conversations from the last N days (default 14)."
         required: false
@@ -132,6 +142,8 @@ jobs:
       STOP_PCT: "0.05"
       LOOKBACK_DAYS: "30"
       X_LOOKBACK_HOURS: ${{ github.event.inputs.x_lookback_hours || '24' }}
+      X_START_TIME: ${{ github.event.inputs.x_start_time || '' }}
+      X_END_TIME: ${{ github.event.inputs.x_end_time || '' }}
       SIGNAL_LOOKBACK_DAYS: ${{ github.event.inputs.signal_lookback_days || '14' }}
       MAX_CONVERSATIONS: ${{ github.event.inputs.max_conversations || '150' }}
       LOCKUP_DAYS: "30"
@@ -178,7 +190,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Debug workflow timing
         run: |
