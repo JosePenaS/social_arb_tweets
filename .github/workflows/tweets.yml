@@ -361,6 +361,38 @@ jobs:
             fi
           fi
 
+      # ------------------------------------------------------------------
+      # v1 backtest: the same strategy on signals from one fixed scoring
+      # setup (historical re-score + live rescore_v1), written to separate
+      # tables so the legacy results above are untouched. Incremental:
+      # only new signals and still-open trades are processed.
+      # ------------------------------------------------------------------
+      - name: Refresh v1 signal features
+        continue-on-error: true
+        env:
+          SIGNALS_TABLE: "twitter_trade_signals_v1_backtest"
+          FEATURES_TABLE: "twitter_trade_signal_features_v1"
+          FEATURE_LOOKBACK_DAYS: "30"
+          MAX_FEATURE_ROWS: "Inf"
+        run: Rscript refresh_trade_signal_features.R
+
+      - name: Refresh v1 backtest results
+        continue-on-error: true
+        env:
+          FEATURES_TABLE: "twitter_trade_signal_features_v1"
+          EXIT_GRID_ENABLED: "true"
+          EXIT_GRID_TARGET_TABLE: "twitter_exit_grid_results_v1"
+          EXIT_GRID_RUN_LABEL: "v1_tp10_sl5_r033_sma10_lock20"
+          EXIT_GRID_FORCE_REBUILD: "false"
+          EXIT_GRID_MAX_ROWS_LOCAL: "Inf"
+          EXIT_GRID_NEW_SIGNAL_LOOKBACK_DAYS: "31"
+          EXIT_GRID_TARGET_PCTS: "0.10"
+          EXIT_GRID_STOP_PCTS: "0.05"
+          EXIT_GRID_RUNNER_SHARES: "0.3333333333333333"
+          EXIT_GRID_SMA_LENS: "10"
+          EXIT_GRID_LOCKUPS: "20"
+        run: Rscript refresh_exit_grid_results_raw.R
+
       # The scrape step may fail without stopping the rest of the pipeline,
       # but the run must still end as failed so GitHub sends a notification.
       - name: Fail the run if scraping failed
