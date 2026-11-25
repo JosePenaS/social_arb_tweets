@@ -85,7 +85,8 @@ The filters and exit rules were chosen on data up to September 20, 2026, when th
 - Long signals carried the results; short signals averaged about zero.
 - **Since July 2026 the edge has reversed.** High-specificity longs now do worse than low-specificity ones. All six accounts with recent 0.90+ signals turned negative, so it is not one source going wrong.
 - Most recent losses hit the −5% stop within days, often in correlated groups: consumer and retail names in July, and large AI and semiconductor stocks (NVDA, GOOGL, AVGO, ASML, MSFT) in October. That points to sector moves rather than independent bad calls.
-- In a separate 40-day holding test, the −5% stop cost about 1 point per trade in good periods but saved about 3 points per trade in weak ones.
+- **The stop is not the problem.** Wider stops (8–15%), no stop, and fixed 10/20/40-day holds were tested on the same trades. For 0.90+ longs they barely changed the good year (+4.7% to +5.6% per trade) but made the out-of-sample losses larger: −8.4% per trade with no stop and −11.8% with a 20-day hold, against −3.0% with the −5% stop. Only 2 of 25 recent stopped-out trades would have recovered within 20 days; several fell more than 20% (NVDA, GOOGL, FFIV).
+- Signals scored 0.80–0.89 behave differently: their longs improve with more room (+1.0% per trade with the −5% stop, +2.1% with no stop over 78 trades). This was found after looking at the data, so it is a hypothesis to track, not a rule.
 
 **What this means.** The rule is not reliable as it stands and should not be traded with real money. It stays in the dashboard as a paper-tracked signal while three explanations are tested: a market-regime change, a stop that is too tight for more volatile markets, and limits on correlated trades (per company and per sector).
 
