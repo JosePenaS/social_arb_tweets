@@ -57,41 +57,46 @@ flowchart LR
 | Variable Analysis | Which signal features relate to better outcomes |
 | Sizing Optimizer | Position-sizing scenarios |
 
-## Results (backtest on re-scored signals, June 2025 – September 2026)
+## Results
 
-**Strategy:** $1,000 per signal; +10% take-profit and −5% stop-loss, with one third of the position kept as a runner that exits below its 10-day moving average (20-day lockup). Signals are filtered for 20-day volatility ≤ 2.5% and 20-day volume ratio ≤ 1.1; completed trades only.
+**Setup.** Every signal from June 2025 to November 2026 (about 14,600 trades with price data) was scored with one fixed model, prompt and temperature, then backtested with the same rules: $1,000 per signal; +10% take-profit and −5% stop-loss, with one third of the position kept as a runner that exits below its 10-day moving average (20-day lockup). Signals are filtered for 20-day volatility ≤ 2.5% and 20-day volume ratio ≤ 1.1; completed trades only.
 
-**How specificity relates to outcomes:**
+The filters and exit rules were chosen on data up to September 20, 2026, when the scoring setup was frozen. Everything after that date is a **true out-of-sample test**.
 
-| Specificity score | Trades | Win rate | Avg return per trade | Median return |
+**In-sample (June 2025 – September 20, 2026):** only the most specific posts stood out.
+
+| Specificity score | Trades | Profitable | Avg return per trade | Median |
 |---|---|---|---|---|
-| 0.90 and above | 188 | 60% | 3.4% (2.7% excluding the best trade) | +3.0% |
-| 0.80 – 0.89 | 95 | 40% | 0.4% | −2.6% |
+| below 0.50 | 1,190 | 44% | +0.4% | −1.7% |
+| 0.50 – 0.79 | 1,267 | 48% | +0.9% | −0.5% |
+| 0.80 – 0.89 | 102 | 41% | +0.4% | −2.3% |
+| **0.90 and above** | **195** | **59%** | **+3.4%** | **+2.9%** |
 
-Adding a market-trend filter (longs only when SPY is above its 10-day average, shorts only when below) raises the 0.90+ group to **4.0% per trade** over 129 trades.
+**Over time (long signals):** the edge disappeared from July 2026, and the out-of-sample period confirms it.
 
-**By period** (0.90+, with the trend filter):
-
-| Period | Trades | Win rate | Avg return per trade |
-|---|---|---|---|
-| Jun – Dec 2025 | 101 | ~67% | ~5.1% |
-| Jan – Mar 2026 | 11 | ~73% | ~3.5% |
-| Apr – Sep 2026 | 17 | 24% | −2.0% |
+| Period | 0.90+ trades | Profitable | Avg return | Other signals, avg return |
+|---|---|---|---|---|
+| Jun 2025 – Jun 2026 | 150 | 67% | **+4.7%** | +1.1% |
+| Jul – Sep 20, 2026 | 18 | 22% | −2.6% | −0.1% |
+| **Sep 21 – Nov 2026 (out-of-sample)** | 14 | 21% | **−3.0%** | −0.8% |
 
 **Key findings**
-- The LLM's specificity score separates useful signals from noise: posts scored 0.90+ perform clearly better than those scored 0.80–0.89.
-- Long signals carry the results; short signals average about zero.
-- The weak April–September 2026 period is driven mostly by one cluster of consumer and retail trades entered in July 2026, during a sector selloff that the market-wide trend filter did not detect. Limits on trades per company and per sector are the planned response.
-- In a separate 40-day holding test, the −5% stop cost about 1 point per trade in good periods but saved about 3 points per trade in the weak period.
+- For the first year, the LLM's specificity score separated useful signals from noise: posts scored 0.90+ returned about four times as much per trade as the rest.
+- Long signals carried the results; short signals averaged about zero.
+- **Since July 2026 the edge has reversed.** High-specificity longs now do worse than low-specificity ones. All six accounts with recent 0.90+ signals turned negative, so it is not one source going wrong.
+- Most recent losses hit the −5% stop within days, often in correlated groups: consumer and retail names in July, and large AI and semiconductor stocks (NVDA, GOOGL, AVGO, ASML, MSFT) in October. That points to sector moves rather than independent bad calls.
+- **The stop is not the problem.** Wider stops (8–15%), no stop, and fixed 10/20/40-day holds were tested on the same trades. For 0.90+ longs they barely changed the good year (+4.7% to +5.6% per trade) but made the out-of-sample losses larger: −8.4% per trade with no stop and −11.8% with a 20-day hold, against −3.0% with the −5% stop. Only 2 of 25 recent stopped-out trades would have recovered within 20 days; several fell more than 20% (NVDA, GOOGL, FFIV).
+- Signals scored 0.80–0.89 behave differently: their longs improve with more room (+1.0% per trade with the −5% stop, +2.1% with no stop over 78 trades). This was found after looking at the data, so it is a hypothesis to track, not a rule.
+
+**What this means.** The rule is not reliable as it stands and should not be traded with real money. It stays in the dashboard as a paper-tracked signal while three explanations are tested: a market-regime change, a stop that is too tight for more volatile markets, and limits on correlated trades (per company and per sector).
 
 **Limitations**
-- Filters and exit rules were selected on the same data they are evaluated on (in-sample); new trades from the frozen rules are the real test.
-- The recent period is small (17 trades).
+- The out-of-sample sample is small (14 long trades at 0.90+), but the July–November results all point the same way.
 - Results exclude commissions, slippage and short-borrow costs.
 
 ## Scoring consistency
 
-In April–May 2026 a rewrite of the signal prompt changed the score distribution (example values in the prompt anchored scores, and conversations without a signal were re-sent to the model on every run). The full history was therefore **re-scored in one pass** with a single model (gpt-4o-2024-11-20), prompt and temperature 0, with every row tagged by scoring version and a fingerprint of the prompt. The results above use these re-scored signals. Switching live scoring to the same setup, and scoring each conversation exactly once, is in an open pull request.
+In April–May 2026 a rewrite of the signal prompt changed the score distribution (example values in the prompt anchored scores, and conversations without a signal were re-sent to the model on every run). The full history was therefore **re-scored in one pass** with a single model (gpt-4o-2024-11-20), prompt and temperature 0, with every row tagged by scoring version and a fingerprint of the prompt. Live scoring now uses the same setup and scores each conversation exactly once. In November 2026 the historical and live scores produced the same share of 0.90+ signals (4–5%), which confirms the two are consistent.
 
 ## Tech stack
 
